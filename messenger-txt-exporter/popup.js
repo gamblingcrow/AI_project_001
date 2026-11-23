@@ -14,6 +14,7 @@ $("export").addEventListener("click", async () => {
       loadAll: $("loadAll").checked,
       maxSteps: Math.max(1, parseInt($("maxSteps").value, 10) || 300),
       includeSeparators: $("includeSeparators").checked,
+      format: document.querySelector('input[name="fmt"]:checked').value,
     };
     status("Working… (see progress on the page)");
 
@@ -25,7 +26,7 @@ $("export").addEventListener("click", async () => {
     });
 
     if (!result || !result.ok) status("Failed: " + (result && result.error ? result.error : "unknown error"));
-    else status(`Saved ${result.count} messages to ${result.filename}`);
+    else status(`Saved ${result.count} messages: ${result.filename}`);
   } catch (e) {
     status("Error: " + e.message);
   } finally {

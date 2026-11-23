@@ -1,6 +1,7 @@
-# Messenger Chat to TXT (Microsoft Edge extension)
+# Messenger Chat Export (Microsoft Edge extension)
 
-Exports the Facebook Messenger conversation you have open to a plain `.txt` file.
+Exports the Facebook Messenger conversation you have open to a plain `.txt` file
+and/or a readable PDF (chat bubbles, names, dates and pictures).
 Works on `messenger.com` and `facebook.com/messages`. Everything runs locally in
 your browser; nothing is sent anywhere.
 
@@ -17,10 +18,13 @@ your browser; nothing is sent anywhere.
 ## Use
 
 1. Open a conversation on messenger.com or facebook.com/messages.
-2. Click the extension icon, then **Export open chat**.
+2. Click the extension icon, pick **TXT**, **PDF** or **Both**, then **Export open chat**.
 3. With "Scroll up to load older messages" on, it scrolls the chat to the top
    to load history (progress shows in the top-right of the page), then saves
    `messenger_<Name>_<date>.txt` to your Downloads folder.
+
+**PDF:** after loading, Edge's print dialog opens. Set **Printer** to **Save as PDF**
+and click **Save**. Pictures are embedded and text stays selectable/searchable.
 
 For very long chats, raise **Max scroll steps** (each step loads one batch of older messages).
 
@@ -44,5 +48,7 @@ Alice Smith: good, see this
   detection, the selectors in `content.js` (`findGrid`, `parseRow`) are the place to adjust.
 - Only the timestamp separators Messenger shows in the chat are captured; per-message
   times appear only on hover, so they aren't included.
-- Photos, videos, voice messages and files appear as `[photo]`, `[video]`, etc.
+- In the TXT file, photos, videos, voice messages and files appear as `[photo]`, `[video]`, etc.
+  In the PDF, photos (and video preview frames) are shown as pictures; voice messages and files are noted as text.
+- PDF pictures are the sizes Messenger shows in the chat, not full-resolution originals.
 - Encrypted chats you haven't unlocked on this device won't show older history.

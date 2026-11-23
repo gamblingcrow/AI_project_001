@@ -5,7 +5,7 @@
   <style>
     body { font: 13px system-ui, sans-serif; width: 280px; margin: 12px; color: #1c1e21; }
     h1 { font-size: 15px; margin: 0 0 10px; }
-    label { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+    label { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; }
     .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
     input[type=number] { width: 64px; }
     button { width: 100%; padding: 8px; margin-top: 8px; border: 0; border-radius: 6px;
@@ -16,14 +16,19 @@
   </style>
 </head>
 <body>
-  <h1>Messenger chat → TXT</h1>
-  <label><input type="checkbox" id="loadAll" checked> Scroll up to load older messages</label>
+  <h1>Messenger chat export</h1>
+  <div class="row">Save as
+    <label><input type="radio" name="fmt" value="txt" checked> TXT</label>
+    <label><input type="radio" name="fmt" value="pdf"> PDF</label>
+    <label><input type="radio" name="fmt" value="both"> Both</label>
+  </div>
+  <label style="display:flex"><input type="checkbox" id="loadAll" checked> Scroll up to load older messages</label>
   <div class="row">Max scroll steps <input type="number" id="maxSteps" value="300" min="1" max="10000"></div>
-  <label><input type="checkbox" id="includeSeparators" checked> Include date/time separators</label>
+  <label style="display:flex"><input type="checkbox" id="includeSeparators" checked> Include date/time separators</label>
   <button id="export">Export open chat</button>
   <div id="status"></div>
   <p class="hint">Open a conversation on messenger.com or facebook.com/messages first.
-  You can close this popup while it runs — progress is shown on the page.</p>
+  Progress is shown on the page.<br>For PDF, a print dialog opens: choose <b>Save as PDF</b> as the printer. Pictures are included.</p>
   <script src="popup.js"></script>
 </body>
 </html>
