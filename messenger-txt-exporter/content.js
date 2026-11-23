@@ -28,7 +28,10 @@
       '[role="grid"][aria-label*="essage" i], [role="log"], [aria-label^="Messages in conversation" i]'
     );
     if (labelled && labelled.querySelector('[role="row"]')) return labelled;
-    // Fallback: the container with the most rows inside the main area.
+    // Fallback 1: find the chat by layout (the scroll area right above the message box).
+    const byLayout = findByLayout();
+    if (byLayout) return byLayout;
+    // Fallback 2: the container with the most rows inside the main area.
     const scope = document.querySelector('[role="main"]') || document.body;
     let best = null, bestCount = 0;
     for (const g of scope.querySelectorAll('[role="grid"], [role="list"], [role="log"]')) {
@@ -38,16 +41,73 @@
     return best;
   }
 
+  function findComposer() {
+    const all = [...document.querySelectorAll('[contenteditable="true"], textarea')];
+    const visible = all.filter((e) => e.getBoundingClientRect().width > 50);
+    return (
+      visible.find((e) => /message|aa/i.test(e.getAttribute("aria-label") || e.getAttribute("placeholder") || "")) ||
+      visible.find((e) => e.getAttribute("role") === "textbox") ||
+      visible[visible.length - 1] ||
+      null
+    );
+  }
+
+  function findByLayout() {
+    const composer = findComposer();
+    const cr = composer && composer.getBoundingClientRect();
+    let best = null, bestScore = 0;
+    for (const el of document.querySelectorAll("div")) {
+      if (!hasScrollStyle(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 200 || r.height < 120) continue;
+      const n = el.querySelectorAll('[dir="auto"]').length;
+      if (n < 1) continue;
+      let score = n;
+      if (cr && cr.width) {
+        const cx = cr.left + cr.width / 2;
+        if (cx < r.left || cx > r.right) continue; // must be in the same column as the message box
+        if (r.bottom > cr.top + 20) continue;       // and sit above it (excludes whole-page scrollers)
+        score += 100000;
+      } else {
+        score += r.left; // no message box found: prefer the right-hand pane (chat list is on the left)
+      }
+      if (score > bestScore) { best = el; bestScore = score; }
+    }
+    return best ? listContainer(best) : null;
+  }
+
+  // Inside the scroll area, the message list is the element with the most children holding content.
+  function listContainer(scroller) {
+    let best = scroller, bestN = 0;
+    for (const el of [scroller, ...scroller.querySelectorAll("div")]) {
+      let n = 0;
+      for (const c of el.children) if (c.querySelector('[dir="auto"], img, video')) n++;
+      if (n > bestN) { best = el; bestN = n; }
+    }
+    return best;
+  }
+
   function getRows(grid) {
     let rows = [...grid.querySelectorAll('[role="row"]')];
     if (!rows.length) rows = [...grid.querySelectorAll('[role="listitem"]')];
+    if (!rows.length) rows = [...grid.children].filter((c) => (c.innerText || "").trim() || c.querySelector("img, video"));
     // keep outermost rows only
     return rows.filter((r) => !rows.some((o) => o !== r && o.contains(r)));
   }
 
+  function hasScrollStyle(el) {
+    return /(auto|scroll|overlay)/.test(getComputedStyle(el).overflowY);
+  }
+
   function isScrollable(el) {
-    const s = getComputedStyle(el);
-    return /(auto|scroll|overlay)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 5;
+    return hasScrollStyle(el) && el.scrollHeight > el.clientHeight + 5;
+  }
+
+  function diagnostics() {
+    const q = (s) => document.querySelectorAll(s).length;
+    return `page=${location.hostname}${location.pathname.replace(/\/[^/]*\d{5,}[^/]*/g, "/…")} ` +
+      `rows=${q('[role="row"]')} grids=${q('[role="grid"]')} textboxes=${q('[contenteditable="true"]')} ` +
+      `texts=${q('[dir="auto"]')} main=${q('[role="main"]')}`;
   }
 
   function findScroller(grid) {
@@ -56,6 +116,10 @@
     }
     // Scroller may be inside the grid.
     for (const el of grid.querySelectorAll("div")) if (isScrollable(el)) return el;
+    // Content may not overflow yet: accept the nearest ancestor styled as a scroll area.
+    for (let el = grid; el && el !== document.body; el = el.parentElement) {
+      if (hasScrollStyle(el)) return el;
+    }
     return null;
   }
 
@@ -202,9 +266,10 @@
     try {
       const grid = findGrid();
       if (!grid) {
-        progress("Couldn't find an open conversation on this page.");
-        closeOverlay();
-        return { ok: false, error: "No open conversation found. Open a chat first." };
+        const diag = diagnostics();
+        progress("Couldn't find an open conversation on this page.\n" + diag);
+        closeOverlay(15000);
+        return { ok: false, error: "No open conversation found. Open a chat first.\n" + diag };
       }
       const title = chatTitle(grid);
       let acc = merge([], snapshot(grid));
