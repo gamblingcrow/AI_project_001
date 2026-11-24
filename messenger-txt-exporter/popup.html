@@ -33,7 +33,8 @@
   </div>
   <label style="display:flex"><input type="checkbox" id="pictures" checked> Include pictures in PDF</label>
   <div class="row">From <input type="date" id="from"> To <input type="date" id="to"></div>
-  <div class="hint" style="margin:-2px 0 6px">Leave empty for the whole chat. With a From date it stops scrolling once it passes that day.</div>
+  <div class="hint" style="margin:-2px 0 6px">Leave empty for the whole chat. With a From date it stops once it passes that day.<br>
+  <b>Start at an older date without scrolling through newer messages:</b> use Messenger's search in this chat, click a message from just before your From date, then press Export. It reads from there (back to From, then forward to To).</div>
   <div class="row">Give up after <input type="number" id="stall" value="90" min="10" max="1800"> s with nothing new</div>
   <label style="display:flex"><input type="checkbox" id="lighten" checked> Lite mode while scrolling (hide read messages, no animations; no pictures drawn when not needed)</label>
   <div class="row">Max scroll steps <input type="number" id="maxSteps" value="20000" min="1" max="1000000"></div>

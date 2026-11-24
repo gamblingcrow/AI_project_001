@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Messenger Chat Export (TXT/PDF)",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Export the open Facebook Messenger conversation to a .txt file or a PDF with pictures.",
   "permissions": [
     "activeTab",

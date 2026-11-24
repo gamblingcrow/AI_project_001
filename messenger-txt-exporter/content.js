@@ -307,6 +307,7 @@
       const r = bubble.getBoundingClientRect();
       if (r.width) side = r.left + r.width / 2 > gridRect.left + gridRect.width / 2 ? "right" : "left";
     }
+    const header = texts.find(isDateHeader);
     let bodyTexts = texts.filter((t) => !isDateHeader(t));
     if (!bodyTexts.length && !media.length) {
       const t = (headingText.join(" ") || row.innerText || "").replace(/\s+/g, " ").trim();
@@ -322,7 +323,7 @@
     const body = bodyTexts.join("\n");
     return {
       type: "message", raw: `row:${sender || side}:${body}:${media.join()}:${images.map((i) => i.src).join()}`,
-      ts: null, sender, side, body, quote: "", text: [body, ...media].filter(Boolean).join("\n"), media, images,
+      ts: header ? parseTime(header) : null, sender, side, body, quote: "", text: [body, ...media].filter(Boolean).join("\n"), media, images,
     };
   }
 
@@ -401,65 +402,166 @@
   // Messages are stored by identity (the hidden "Message sent … by …" line), not by DOM position,
   // so rows that Messenger re-renders, re-orders or inserts below its "Loading…" row can't be
   // duplicated or misplaced. Everything is sorted by time when saving.
+  //
+  // A MutationObserver reports which rows Messenger added or changed, so each step only reads
+  // the new rows: the add-on's own work per step stays the same however long the chat gets.
   const records = new Map();      // key -> record
   const doneKeys = new Set();     // keys already written to a file (or outside the date range)
-  const rowCache = new WeakMap(); // row element -> { sig, parsed }
+  const slots = new Map();        // raw text -> [{ ref: WeakRef(row), key }] (tells re-renders from look-alike messages)
+  const rowInfo = new WeakMap();  // row element -> { key, raw }
   const senders = new Set();
-  let snapNo = 0, minTs = null;
+  let batchNo = 0, minTs = null, maxTs = null;
+  let direction = -1;             // -1 = loading older (scrolling up), +1 = loading newer (scrolling down)
 
-  // full = re-check rows that were parsed before (catches rows Messenger reused for another message)
-  function collect(grid, full) {
-    snapNo++;
-    const gridRect = grid.getBoundingClientRect();
-    const rows = getRows(grid);
-    const occurrences = new Map();
-    const fresh = [];
-    let added = 0;
-    rows.forEach((row, idx) => {
-      let c = rowCache.get(row);
-      if (!c || full) {
-        const sig = row.textContent.length + ":" + row.querySelectorAll("img").length;
-        if (!c || c.sig !== sig) {
-          c = { sig, parsed: parseRow(row, gridRect) };
-          rowCache.set(row, c);
+  let rowSel = null;              // '[role="row"]' | '[role="listitem"]' | null (= direct children of the list)
+  function detectRowSel(grid) {
+    for (const sel of ['[role="row"]', '[role="listitem"]']) if (grid.querySelector(sel)) return sel;
+    return null;
+  }
+
+  // The (outermost) message row that contains a node, or null.
+  function rowOf(grid, node) {
+    let el = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!el || el === grid || !grid.contains(el)) return null;
+    if (rowSel) {
+      let r = el.closest(rowSel);
+      if (!r || !grid.contains(r)) return null;
+      for (let p = r.parentElement && r.parentElement.closest(rowSel); p && grid.contains(p);
+        p = p.parentElement && p.parentElement.closest(rowSel)) r = p;
+      return r;
+    }
+    while (el && el.parentElement !== grid) el = el.parentElement;
+    return el;
+  }
+
+  const pending = new Set();
+  let observer = null, wake = null;
+  function startObserver(grid) {
+    observer = new MutationObserver((muts) => {
+      for (const m of muts) {
+        if (m.type === "childList") {
+          for (const n of m.addedNodes) {
+            const r = rowOf(grid, n.nodeType === 1 ? n : m.target);
+            if (r) pending.add(r);
+            else if (n.nodeType === 1 && rowSel) {
+              for (const x of n.querySelectorAll(rowSel)) { const rr = rowOf(grid, x); if (rr) pending.add(rr); }
+            } else if (n.nodeType === 1 && !rowSel && n.parentElement === grid) pending.add(n);
+          }
+          if (m.removedNodes.length) { const r = rowOf(grid, m.target); if (r) pending.add(r); }
+        } else if (m.type === "characterData") {
+          const r = rowOf(grid, m.target);
+          if (r) pending.add(r);
         }
       }
-      const p = c.parsed;
+      if (pending.size && wake) { const w = wake; wake = null; w(true); }
+    });
+    observer.observe(grid, { childList: true, subtree: true, characterData: true });
+  }
+  function stopObserver() { if (observer) observer.disconnect(); observer = null; }
+
+  function waitForRows(ms) {
+    if (pending.size) return Promise.resolve(true);
+    return new Promise((res) => {
+      wake = res;
+      setTimeout(() => { if (wake === res) { wake = null; res(false); } }, ms);
+    });
+  }
+  function takePending() { const rows = [...pending]; pending.clear(); return rows; }
+
+  function assignSlot(raw, row) {
+    let list = slots.get(raw);
+    if (!list) slots.set(raw, (list = []));
+    for (const s of list) if (s.ref.deref() === row) return s.key;
+    // The same message re-rendered as a new element: the old element is gone from the page.
+    for (const s of list) {
+      const el = s.ref.deref();
+      if (!el || !el.isConnected) { s.ref = new WeakRef(row); return s.key; }
+    }
+    // Otherwise it's a different message that looks identical (same person, minute and text).
+    const key = raw + "#" + (list.length + 1);
+    list.push({ ref: new WeakRef(row), key });
+    return key;
+  }
+
+  // A later look at the same row may see more (a picture that finished loading, etc.).
+  function mergeInto(rec, p) {
+    if (!rec) return;
+    if ((p.images || []).length > (rec.images || []).length) { rec.images = p.images; rec.media = p.media; }
+    if ((p.text || "").length > (rec.text || "").length) {
+      rec.text = p.text; rec.body = p.body; rec.quote = p.quote; rec.media = p.media;
+    }
+    if (!rec.ts && p.ts) rec.ts = p.ts;
+  }
+
+  const readQueue = [];           // rows in the order they were read (for lite mode hiding)
+
+  function collect(grid, rows) {
+    batchNo++;
+    const rank = direction * batchNo; // orders batches in time: older batches first
+    const gridRect = grid.getBoundingClientRect();
+    const list = rows.filter((r) => r.isConnected);
+    list.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    const batch = [];
+    let added = 0;
+    list.forEach((row, idx) => {
+      const p = parseRow(row, gridRect);
       if (!p) return;
-      const n = (occurrences.get(p.raw) || 0) + 1; // identical messages in the same minute stay separate
-      occurrences.set(p.raw, n);
-      const key = p.raw + "#" + n;
-      if (records.has(key) || doneKeys.has(key)) { fresh.push(records.get(key) || null); return; }
-      const rec = { ...p, key, snap: snapNo, idx };
+      const prev = rowInfo.get(row);
+      if (prev && prev.raw === p.raw) { const r = records.get(prev.key); mergeInto(r, p); batch.push(r || null); return; }
+      // The hidden line arrived after the first look: replace the provisional record.
+      if (prev && prev.raw.startsWith("row:") && !p.raw.startsWith("row:")) records.delete(prev.key);
+      const key = assignSlot(p.raw, row);
+      rowInfo.set(row, { key, raw: p.raw });
+      readQueue.push(new WeakRef(row));
+      if (records.has(key)) { mergeInto(records.get(key), p); batch.push(records.get(key)); return; }
+      if (doneKeys.has(key)) { batch.push(null); return; }
+      const rec = { ...p, key, rank, idx };
       records.set(key, rec);
-      fresh.push(rec);
+      batch.push(rec);
       added++;
     });
-    // Rows without their own time take it from neighbours in the same snapshot (DOM order).
+    // Rows without their own time take it from neighbours in the same batch (page order).
     let carry = null;
-    for (const r of fresh) {
+    for (const r of batch) {
       if (!r) continue;
       if (r.ts) carry = r.ts;
-      else if (r.type === "separator" && r.date) { carry = r.date; r.ts = r.date; }
-      else if (carry && r.snap === snapNo) r.ts = carry;
+      else if (r.type === "separator" && r.date) { r.ts = r.date; carry = r.date; }
+      else if (carry && r.rank === rank) r.ts = carry;
     }
     carry = null;
-    for (let i = fresh.length - 1; i >= 0; i--) {
-      const r = fresh[i];
+    for (let i = batch.length - 1; i >= 0; i--) {
+      const r = batch[i];
       if (!r) continue;
       if (r.ts) carry = r.ts;
-      else if (carry && r.snap === snapNo) r.ts = carry;
+      else if (carry && r.rank === rank) r.ts = carry;
     }
-    for (const r of fresh) {
-      if (r && r.snap === snapNo) {
-        if (r.ts && (!minTs || r.ts < minTs)) minTs = r.ts;
-        if (r.who && r.who !== "You") senders.add(r.who);
-      }
+    for (const r of batch) {
+      if (!r || r.rank !== rank) continue;
+      if (r.ts && (!minTs || r.ts < minTs)) minTs = r.ts;
+      if (r.ts && (!maxTs || r.ts > maxTs)) maxTs = r.ts;
+      if (r.who && r.who !== "You") senders.add(r.who);
     }
     return added;
   }
 
-  const byTime = (a, b) => (a.ts && b.ts && a.ts - b.ts) || b.snap - a.snap || a.idx - b.idx;
+  // Time used for sorting/periods; rows that never got one borrow from the neighbouring batches.
+  const T = (r) => r.ts || r.tsGuess || null;
+  function sortRecords(items) {
+    if (items.some((r) => !r.ts) && items.some((r) => r.ts)) {
+      const byPos = [...items].sort((a, b) => a.rank - b.rank || a.idx - b.idx);
+      let c = null;
+      for (const r of byPos) { if (r.ts) c = r.ts; else if (c) r.tsGuess = c; }
+      c = null;
+      for (let i = byPos.length - 1; i >= 0; i--) {
+        const r = byPos[i];
+        if (r.ts) c = r.ts; else if (!r.tsGuess && c) r.tsGuess = c;
+      }
+    }
+    return items.sort((a, b) => {
+      const ta = T(a), tb = T(b);
+      return (ta && tb && ta - tb) || a.rank - b.rank || a.idx - b.idx;
+    });
+  }
 
   // Fallback sender guess for rows without the hidden line (group chats name only the first of a run).
   function fillSenders(items, title) {
@@ -471,30 +573,29 @@
     }
   }
 
-  // Hide rows that were already read (except the oldest few at the top) so Messenger has
-  // less to lay out and paint while loading more history. They are shown again at the end.
+  // ---------- lite mode ----------
+  // Hide rows that were already read (except the most recently read ones, which sit at the edge
+  // where Messenger loads more), turn off animations and, when pictures aren't needed, stop
+  // drawing images. Only changes how the page is drawn in this browser; undone at the end.
   const hiddenRows = [];
-  function hideReadRows(grid, keep = 40) {
-    const rows = getRows(grid);
-    for (let i = keep; i < rows.length; i++) {
-      const r = rows[i];
-      if (r.style.display !== "none" && rowCache.has(r)) {
+  function hideReadRows(keep = 60) {
+    const end = readQueue.length - keep;
+    for (let i = 0; i < end; i++) {
+      const r = readQueue[i].deref();
+      if (r && r.isConnected && r.style.display !== "none") {
         r.style.display = "none";
         hiddenRows.push(new WeakRef(r));
       }
     }
+    if (end > 0) readQueue.splice(0, end);
   }
-  function unhideRows() {
+  function showRows() {
     for (const ref of hiddenRows.splice(0)) {
       const r = ref.deref();
       if (r) r.style.display = "";
     }
-    document.getElementById("__mtx_lite")?.remove();
-    document.querySelector("[data-mtx-grid]")?.removeAttribute("data-mtx-grid");
+    readQueue.length = 0;
   }
-
-  // "Lite mode" while exporting: no animations, and no image drawing when pictures aren't needed.
-  // Only changes how the page is drawn in this browser; undone when the export ends.
   function liteMode(grid, hideImages) {
     grid.setAttribute("data-mtx-grid", "");
     const st = document.createElement("style");
@@ -503,6 +604,11 @@
       "*,*::before,*::after{animation:none!important;transition:none!important}" +
       (hideImages ? "[data-mtx-grid] img,[data-mtx-grid] video{visibility:hidden!important}" : "");
     document.head.appendChild(st);
+  }
+  function endLite() {
+    showRows();
+    document.getElementById("__mtx_lite")?.remove();
+    document.querySelector("[data-mtx-grid]")?.removeAttribute("data-mtx-grid");
   }
 
   // ---------- periods ----------
@@ -519,6 +625,8 @@
   }
   const periodStart = (d, split) =>
     split === "year" ? new Date(d.getFullYear(), 0, 1) : new Date(d.getFullYear(), d.getMonth(), 1);
+  const periodEnd = (d, split) =>
+    split === "year" ? new Date(d.getFullYear() + 1, 0, 1) : new Date(d.getFullYear(), d.getMonth() + 1, 1);
 
   // ---------- text output ----------
   const short = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
@@ -761,7 +869,7 @@
       }
 
       const savedFiles = [];
-      let savedMessages = 0, reachedFrom = false;
+      let savedMessages = 0;
 
       async function savePeriod(key, group) {
         const count = group.filter((i) => i.type === "message").length;
@@ -793,41 +901,63 @@
         savedMessages += count;
       }
 
+      // Is the loaded range [minTs, maxTs] guaranteed to contain all of this period (within From/To)?
+      let startedAtPresent = true;
+      function periodComplete(ts) {
+        const ps = periodStart(ts, split), pe = periodEnd(ts, split);
+        const lo = from && from > ps ? from : ps;
+        const hi = toEnd && toEnd < pe ? toEnd : pe;
+        return !!(minTs && minTs < lo && (startedAtPresent || (maxTs && maxTs >= hi)));
+      }
+
       // Save every period that is fully loaded (or everything when final), then forget it to free memory.
-      // A period is complete once something older than its start has been loaded.
       async function flush(final) {
         if (!final && split === "none") return;
         if (!final && !minTs) return;
-        const items = [...records.values()].sort(byTime);
+        const items = sortRecords([...records.values()]);
         fillSenders(items, title);
-        const ready = final ? items : items.filter((it) => it.ts && periodStart(it.ts, split) > minTs);
+        const ready = final ? items : items.filter((it) => T(it) && periodComplete(T(it)));
         if (!ready.length) return;
         const groups = new Map();
         for (const it of ready) {
           records.delete(it.key);
           doneKeys.add(it.key);
-          if (it.ts && ((from && it.ts < from) || (toEnd && it.ts >= toEnd))) continue;
-          const k = periodKey(it.ts, split);
+          const t = T(it);
+          if (t && ((from && t < from) || (toEnd && t >= toEnd))) continue;
+          const k = periodKey(t, split);
           if (!groups.has(k)) groups.set(k, []);
           groups.get(k).push(it);
         }
         for (const [k, g] of groups) await savePeriod(k, g);
       }
 
+      rowSel = detectRowSel(grid);
       if (lighten) liteMode(grid, !wantPictures);
-      collect(grid, true);
+      collect(grid, getRows(grid));
+      startObserver(grid);
       progress(`Found chat: ${title}\nRead ${records.size} rows…`);
 
       const scroller = loadAll ? findScroller(grid) : null;
       if (loadAll && !scroller) progress("Couldn't find the scroll area; exporting visible messages only.");
 
-      let stopReason = "";
-      if (scroller) {
+      // Where are we? At the newest message → read backwards (as before). Somewhere in the past
+      // (e.g. after clicking a search result) → read back to From (if set), then forward to To.
+      if (scroller) startedAtPresent = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+      const phases = !scroller ? [] : startedAtPresent ? [-1] : from ? [-1, 1] : [1];
+
+      const batchTimes = [];
+      let totalSteps = 0, stopReason = "", pageRows = 0;
+      const memMB = () => (performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null);
+      const avg = (a) => a.reduce((x, y) => x + y, 0) / (a.length || 1);
+
+      async function runPhase(dir) {
+        direction = dir;
         let lastNewAt = Date.now();
         for (let step = 1; ; step++) {
-          if (reachedFrom) { stopReason = "from"; break; }
-          if (step > maxSteps) { stopReason = "steps"; break; }
-          if (userStop) { stopReason = "user"; break; }
+          if (dir < 0 && from && minTs && minTs < from) return "from";
+          if (dir > 0 && toEnd && maxTs && maxTs >= toEnd) return "to";
+          if (totalSteps++ >= maxSteps) return "steps";
+          if (userStop) return "user";
 
           // Background tabs are throttled by the browser: pause instead of mistaking it for the end.
           if (document.hidden) {
@@ -837,47 +967,73 @@
             continue;
           }
 
-          const prevHeight = scroller.scrollHeight;
-          if (Date.now() - lastNewAt > 3000) {
-            // Nudge: scroll down a bit and back up, so Messenger notices it should load more.
-            scroller.scrollTop = Math.min(800, Math.max(200, scroller.clientHeight));
+          const t0 = Date.now();
+          if (t0 - lastNewAt > 3000) {
+            // Nudge: move away from the edge and back, so Messenger notices it should load more.
+            const d = Math.min(800, Math.max(200, scroller.clientHeight));
+            scroller.scrollTop = dir < 0 ? d : scroller.scrollHeight - scroller.clientHeight - d;
             scroller.dispatchEvent(new Event("scroll"));
             await sleep(400);
           }
-          scroller.scrollTop = 0;
+          scroller.scrollTop = dir < 0 ? 0 : scroller.scrollHeight;
           scroller.dispatchEvent(new Event("scroll"));
-          // wait up to ~5 s for more history to appear
-          for (let t = 0; t < 25 && !userStop; t++) {
-            await sleep(200);
-            if (scroller.scrollHeight !== prevHeight) break;
+          const got = await waitForRows(5000);
+          const arrived = Date.now();
+          if (got) await sleep(150); // let Messenger finish drawing the batch
+          const added = pending.size ? collect(grid, takePending()) : 0;
+          if (added) {
+            lastNewAt = Date.now();
+            batchTimes.push((arrived - t0) / 1000);
+          } else {
+            // Near the newest messages there is simply nothing more to load: don't wait long.
+            const limit = dir > 0 && maxTs && Date.now() - maxTs < 864e5 ? Math.min(stallSeconds, 20) : stallSeconds;
+            if (!document.hidden && Date.now() - lastNewAt > limit * 1000) return "stalled";
           }
-          await sleep(250);
-          const added = collect(grid, step % 10 === 0);
-          if (added) lastNewAt = Date.now();
-          else if (!document.hidden && Date.now() - lastNewAt > stallSeconds * 1000) { stopReason = "stalled"; break; }
 
-          if (from && minTs && minTs < from) reachedFrom = true;
           await flush(false);
-          if (lighten) hideReadRows(grid);
+          if (lighten) hideReadRows();
+          if (step % 10 === 1) pageRows = rowSel ? grid.querySelectorAll(rowSel).length : grid.children.length;
           const idle = Math.round((Date.now() - lastNewAt) / 1000);
-          progress(`Loading history… step ${step}\nRead ${records.size + doneKeys.size} rows` +
-            (minTs ? `\nOldest reached: ${fmtDay(minTs)}` : "") +
-            (from ? `\nGoing back to: ${fmtDay(from)}` : "") +
-            (idle >= 5 ? `\nWaiting for Messenger to load more… ${idle}s (gives up at ${stallSeconds}s)` : "") +
+          const mem = memMB();
+          progress(`${dir < 0 ? "Loading older messages" : "Loading newer messages"}… step ${totalSteps}\n` +
+            `Read ${records.size + doneKeys.size} messages` +
+            (minTs ? `\nRange loaded: ${fmtDay(minTs)} – ${fmtDay(maxTs)}` : "") +
+            (dir < 0 && from ? `\nGoing back to: ${fmtDay(from)}` : "") +
+            (dir > 0 && to ? `\nGoing forward to: ${fmtDay(to)}` : "") +
+            (batchTimes.length ? `\nMessenger: ${avg(batchTimes.slice(-10)).toFixed(1)} s per batch · ${pageRows} rows on page` +
+              (mem ? ` · ${mem} MB` : "") : "") +
+            (idle >= 5 ? `\nWaiting for Messenger to load more… ${idle}s` : "") +
             (savedFiles.length ? `\nSaved ${savedFiles.length} file(s), latest: ${savedFiles[savedFiles.length - 1]}` : ""));
         }
       }
 
+      for (let i = 0; i < phases.length; i++) {
+        if (i > 0) showRows(); // the rows at the other edge must be visible again to load from there
+        stopReason = await runPhase(phases[i]);
+        if (stopReason === "user" || stopReason === "steps") break;
+      }
+
+      stopObserver();
       await flush(true);
-      unhideRows();
+      endLite();
+      const reachedFrom = !from || (minTs && minTs < from);
+      const reachedTo = !to || startedAtPresent || (maxTs && maxTs >= toEnd);
 
       const notes = [];
       if ((from || to) && !minTs) notes.push("Couldn't read any dates in this chat, so the date range was ignored.");
-      if (stopReason === "stalled") {
-        notes.push(`Stopped because Messenger loaded nothing new for ${stallSeconds}s` +
-          (from && !reachedFrom ? ` (before reaching ${fmtDay(from)}).` : " — most likely the start of the chat."));
-      } else if (stopReason === "steps") notes.push("Stopped at the scroll step limit.");
+      if (!startedAtPresent) notes.push(`Started from where the chat was scrolled to, not from the newest message.`);
+      if (from && minTs && !reachedFrom) {
+        notes.push(`Didn't reach ${fmtDay(from)}: the oldest message loaded is from ${fmtDay(minTs)}` +
+          (startedAtPresent ? "." : " (jump to a message from before that day and run again)."));
+      }
+      if (to && !reachedTo && stopReason !== "user") notes.push(`Didn't reach ${fmtDay(to)}: Messenger stopped loading newer messages at ${fmtDay(maxTs)}.`);
+      if (stopReason === "stalled" && reachedFrom && reachedTo) notes.push(`Stopped when Messenger had nothing more to load (${startedAtPresent ? "start of the chat" : "end of the loaded range"}).`);
+      else if (stopReason === "steps") notes.push("Stopped at the scroll step limit.");
       else if (stopReason === "user") notes.push("Stopped by you.");
+      if (batchTimes.length >= 20) {
+        notes.push(`Messenger speed: ${avg(batchTimes.slice(0, 10)).toFixed(1)} s per batch at the start, ` +
+          `${avg(batchTimes.slice(-10)).toFixed(1)} s at the end (${batchTimes.length} batches).`);
+      }
       if (!savedFiles.length) notes.push("No messages matched, nothing was saved.");
       const note = notes.join("\n");
 
@@ -887,7 +1043,8 @@
       closeOverlay(note ? 15000 : 5000);
       return { ok: true, count: savedMessages, filename: `${filename} in ${where}`, note };
     } catch (e) {
-      unhideRows();
+      stopObserver();
+      endLite();
       progress("Error: " + e.message, true);
       closeOverlay(10000);
       return { ok: false, error: e.message };

@@ -41,6 +41,18 @@ Dates come from the dividers Messenger shows between message groups ("Today", "M
 "Nov 3, 2025", "lapkričio 3 d." …), in English or Lithuanian. Each message gets the date of the
 divider above it. If no dates can be read, the whole loaded chat is exported and the popup says so.
 
+**Exporting an older period without scrolling through newer messages:** in the chat, use
+Messenger's search, click a message from just before your From date (Messenger jumps there and
+loads only the messages around it), then click Export. When the chat isn't at the newest message,
+the add-on reads from where it is: back to From (if set), then forward to To (or to the newest
+message). Reload the page between big runs: that's the only way to make Messenger forget what it
+has loaded, and a fresh page is fast again.
+
+**Why it slows down:** Messenger loads history in small batches, one after another, and keeps every
+loaded message in the page. The add-on now only looks at the rows Messenger just added, so its own
+work per batch stays constant; the progress box shows Messenger's time per batch, the number of rows
+on the page and memory use, so you can see the slowdown happening on Messenger's side.
+
 **Long chats / when does it stop?** It keeps scrolling until one of these happens:
 you reach the From date, Messenger loads nothing new for **Give up after N s** (default 90 s;
 raise it if your chat stops early), you click **Stop & save what I have** on the progress box,
