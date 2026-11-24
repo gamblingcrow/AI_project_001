@@ -1,6 +1,6 @@
 // Injected into messenger.com / facebook.com by the popup.
 // Defines window.__messengerTxtExport(options) which scrolls the open chat,
-// collects messages and downloads them as a .txt file.
+// collects messages and saves them as .txt and/or .pdf (optionally one file per year/month).
 (() => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,11 +88,17 @@
   }
 
   function getRows(grid) {
-    let rows = [...grid.querySelectorAll('[role="row"]')];
-    if (!rows.length) rows = [...grid.querySelectorAll('[role="listitem"]')];
-    if (!rows.length) rows = [...grid.children].filter((c) => (c.innerText || "").trim() || c.querySelector("img, video"));
-    // keep outermost rows only
-    return rows.filter((r) => !rows.some((o) => o !== r && o.contains(r)));
+    for (const sel of ['[role="row"]', '[role="listitem"]']) {
+      const rows = [...grid.querySelectorAll(sel)];
+      if (rows.length) {
+        // keep outermost rows only
+        return rows.filter((r) => {
+          const p = r.parentElement && r.parentElement.closest(sel);
+          return !p || !grid.contains(p);
+        });
+      }
+    }
+    return [...grid.children].filter((c) => (c.innerText || "").trim() || c.querySelector("img, video"));
   }
 
   function hasScrollStyle(el) {
@@ -148,9 +154,8 @@
     return out;
   }
 
-  // Image loads started during collection (blob: images from encrypted chats are copied
-  // right away, because Messenger may revoke them once the row scrolls out of view).
-  const pendingImages = [];
+  // blob: images (encrypted chats) are copied right away, because Messenger may revoke
+  // them once the row scrolls out of view.
 
   function toDataUrl(src) {
     return fetch(src)
@@ -163,11 +168,13 @@
       }));
   }
 
+  let wantPictures = true;
+
   function addImage(list, src, label) {
-    if (!src || list.some((i) => i.src === src)) return;
+    if (!wantPictures || !src || list.some((i) => i.src === src)) return;
     const item = { src, label };
     if (src.startsWith("blob:")) {
-      pendingImages.push(toDataUrl(src).then((d) => { item.src = d; }).catch(() => {}));
+      item.ready = toDataUrl(src).then((d) => { item.src = d; }).catch(() => {});
     }
     list.push(item);
   }
@@ -316,48 +323,70 @@
     return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
   };
 
-  // ---------- incremental collection (survives list virtualization) ----------
+  // ---------- incremental collection (each row is read once) ----------
   let idSeq = 0;
   const ids = new WeakMap();
   const idOf = (el) => { if (!ids.has(el)) ids.set(el, ++idSeq); return ids.get(el); };
+  const seen = new Set();
 
-  function snapshot(grid) {
+  // New rows above the already-known ones are older history (prepended);
+  // new rows below them are messages that arrived meanwhile (appended).
+  function collectNew(grid, acc) {
     const gridRect = grid.getBoundingClientRect();
-    return getRows(grid).map((row) => ({ id: idOf(row), data: parseRow(row, gridRect) }));
-  }
-
-  function merge(acc, snap) {
-    if (!acc.length) return snap.slice();
-    const known = new Set(acc.map((e) => e.id));
-    const firstIdx = snap.findIndex((e) => e.id === acc[0].id);
-    const newer = snap.filter((e) => !known.has(e.id));
-    if (firstIdx >= 0) {
-      // Rows before the old first row were loaded above it.
-      const before = snap.slice(0, firstIdx).filter((e) => !known.has(e.id));
-      const after = newer.filter((e) => !before.includes(e));
-      return [...before, ...acc, ...after];
+    const before = [], after = [];
+    let passedKnown = false;
+    for (const row of getRows(grid)) {
+      const id = idOf(row);
+      if (seen.has(id)) { passedKnown = true; continue; }
+      seen.add(id);
+      (passedKnown ? after : before).push({ id, data: parseRow(row, gridRect) });
     }
-    // No overlap: assume everything new is older history.
-    return [...newer, ...acc];
+    if (before.length) acc.unshift(...before);
+    if (after.length) acc.push(...after);
+    return before.length + after.length;
   }
 
   // ---------- formatting ----------
-  // Fill in senders: group chats only name the first message of a run.
+  // Fill in senders (group chats only name the first message of a run) and remember each item's index.
   function resolve(title, entries) {
     let lastLeft = null;
     const out = [];
-    for (const { data } of entries) {
-      if (!data) continue;
-      if (data.type === "separator") { out.push(data); continue; }
+    entries.forEach(({ data }, i) => {
+      if (!data) return;
+      if (data.type === "separator") { out.push({ ...data, _i: i }); return; }
       let who = data.sender;
       if (!who) who = data.side === "right" ? "You" : (lastLeft || title);
       if (who !== "You") lastLeft = who;
-      out.push({ ...data, who });
-    }
+      out.push({ ...data, who, _i: i });
+    });
     return out;
   }
 
-  function format(title, items, includeSeparators, rangeLabel) {
+  // Each item gets the date of the divider above it (null before the first readable divider).
+  function assignDays(items) {
+    let current = null;
+    for (const it of items) {
+      if (it.type === "separator" && it.date) current = it.date;
+      it.day = current;
+    }
+  }
+
+  const pad2 = (n) => String(n).padStart(2, "0");
+  function periodKey(d, split) {
+    if (split === "none") return "all";
+    if (!d) return "undated";
+    return split === "year" ? `${d.getFullYear()}` : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+  }
+  function periodLabel(key, split) {
+    if (key === "all" || key === "undated") return key === "undated" ? "undated" : "";
+    if (split === "year") return key;
+    const [y, m] = key.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString(undefined, { year: "numeric", month: "long" });
+  }
+  const periodStart = (d, split) =>
+    split === "year" ? new Date(d.getFullYear(), 0, 1) : new Date(d.getFullYear(), d.getMonth(), 1);
+
+  function format(title, items, includeSeparators, rangeLabel, periodLabel) {
     const lines = [];
     let count = 0;
     for (const data of items) {
@@ -375,6 +404,7 @@
       `Conversation: ${title}`,
       `Exported: ${new Date().toLocaleString()}`,
       `Source: ${location.href}`,
+      ...(periodLabel ? [`Period: ${periodLabel}`] : []),
       ...(rangeLabel ? [`Range: ${rangeLabel}`] : []),
       `Messages: ${count}`,
       "=".repeat(60),
@@ -382,15 +412,58 @@
     return { text: header.join("\n") + "\n" + lines.join("\n").replace(/^\n+/, "") + "\n", count };
   }
 
-  function download(filename, text) {
+
+  // ---------- saving files ----------
+  const viaExtension = () => typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id;
+
+  function anchorDownload(filename, text) {
     const blob = new Blob(["﻿" + text], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = filename;
+    a.download = filename.split("/").pop();
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
+  async function saveText(path, text) {
+    if (!viaExtension()) return anchorDownload(path, text);
+    const r = await chrome.runtime.sendMessage({ type: "saveText", filename: path, text });
+    if (!r || !r.ok) throw new Error((r && r.error) || "Saving the text file failed");
+  }
+
+  // Plain, message-safe copy of items for the PDF page.
+  function pdfPayload(items) {
+    return items.map((it) =>
+      it.type === "separator"
+        ? { type: "separator", text: it.text }
+        : { type: "message", who: it.who, body: it.body, media: it.media,
+            images: (it.images || []).map((im) => ({ src: im.src, label: im.label })) }
+    );
+  }
+
+  const approxSize = (it) =>
+    300 + ((it.body || it.text || "").length * 2) + (it.images || []).reduce((a, im) => a + im.src.length, 0);
+
+  // Automatic PDF: the extension renders the items in a background tab and saves it (no print dialog).
+  async function savePdfAuto(path, meta, items) {
+    const begin = await chrome.runtime.sendMessage({ type: "pdfBegin", meta: { ...meta, filename: path } });
+    if (!begin || !begin.id) throw new Error("Could not start PDF");
+    let batch = [], size = 0;
+    const send = async () => {
+      if (!batch.length) return;
+      await chrome.runtime.sendMessage({ type: "pdfChunk", id: begin.id, items: batch });
+      batch = []; size = 0;
+    };
+    for (const it of items) {
+      const s = approxSize(it);
+      if (batch.length && size + s > 16e6) await send();
+      batch.push(it); size += s;
+    }
+    await send();
+    const r = await chrome.runtime.sendMessage({ type: "pdfEnd", id: begin.id });
+    if (!r || !r.ok) throw new Error((r && r.error) || "PDF failed");
   }
 
   // ---------- PDF (printable page + Edge's "Save as PDF") ----------
@@ -460,41 +533,47 @@
     return Promise.race([all, sleep(timeoutMs)]);
   }
 
-  async function savePdf(title, items, includeSeparators, count, fileBase, keepPreview, rangeLabel) {
-    progress("Preparing PDF (loading pictures)…");
-    await Promise.allSettled(pendingImages);
-    const iframe = document.createElement("iframe");
-    iframe.id = "__mtx_pdf";
-    iframe.style.cssText = keepPreview
-      ? "position:fixed;inset:0;width:100%;height:100%;z-index:2147483646;background:#fff;border:0"
-      : "position:fixed;right:0;bottom:0;width:900px;height:700px;opacity:0;pointer-events:none;border:0;z-index:-1";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument;
-    buildPdfDoc(doc, title, items, includeSeparators, count, fileBase, rangeLabel);
+
+  async function finishImages(doc) {
     await waitForImages(doc);
-    // Replace pictures that failed to load with a note.
-    for (const img of doc.images) {
+    for (const img of [...doc.images]) {
       if (!img.naturalWidth) img.replaceWith(el(doc, "div", "tag", `[${img.alt} could not be loaded]`));
     }
-    if (keepPreview) return;
+  }
+
+  // Fallback when the automatic PDF can't run: print dialog inside the page.
+  async function savePdfDialog(meta, items) {
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:900px;height:700px;opacity:0;pointer-events:none;border:0;z-index:-1";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument;
+    buildPdfDoc(doc, meta.title, items, meta.includeSeparators, meta.count, meta.fileBase, meta.rangeLabel);
+    await finishImages(doc);
     progress('Choose "Save as PDF" as the printer in the dialog.');
     const oldTitle = document.title;
-    document.title = fileBase;
+    document.title = meta.fileBase;
     iframe.contentWindow.focus();
     iframe.contentWindow.print();
     document.title = oldTitle;
     setTimeout(() => iframe.remove(), 2000);
   }
 
+  // Shared with report.html (the background PDF page).
+  window.__mtxBuildPdfDoc = buildPdfDoc;
+  window.__mtxFinishImages = finishImages;
   window.__mtxParseDate = parseSepDate; // handy for troubleshooting from the console
 
   // ---------- main ----------
-  window.__messengerTxtExport = async ({ loadAll = true, maxSteps = 300, includeSeparators = true, format: fmt = "txt", keepPreview = false, from: fromStr = "", to: toStr = "" } = {}) => {
+  window.__messengerTxtExport = async ({
+    loadAll = true, maxSteps = 2000, includeSeparators = true, format: fmt = "txt",
+    from: fromStr = "", to: toStr = "", split = "none", pictures = true,
+  } = {}) => {
     try {
+      wantPictures = pictures && fmt !== "txt";
       const from = parseInputDate(fromStr), to = parseInputDate(toStr);
       if (from && to && from > to) return { ok: false, error: "The From date is after the To date." };
       const rangeLabel = from || to ? `${from ? fmtDay(from) : "start"} – ${to ? fmtDay(to) : "now"}` : "";
-      let reachedFrom = false;
+
       const grid = findGrid();
       if (!grid) {
         const diag = diagnostics();
@@ -503,7 +582,73 @@
         return { ok: false, error: "No open conversation found. Open a chat first.\n" + diag };
       }
       const title = chatTitle(grid);
-      let acc = merge([], snapshot(grid));
+      const safe = title.replace(/[\\/:*?"<>|~\u0000-\u001f]+/g, "_").replace(/^[.\s]+|[.\s]+$/g, "").slice(0, 80) || "chat";
+      const stamp = new Date().toISOString().slice(0, 10);
+      const folder = `Messenger export/${safe}`;
+
+      const acc = [];
+      const savedFiles = [];
+      let savedMessages = 0, anyDates = false, reachedFrom = false;
+
+      async function savePeriod(key, group) {
+        const count = group.filter((i) => i.type === "message").length;
+        if (!count) return;
+        const label = periodLabel(key, split);
+        const base = `messenger_${safe}_${key === "all" ? stamp : key}`;
+        const shownTitle = label ? `${title} — ${label}` : title;
+        if (fmt === "txt" || fmt === "both") {
+          const { text } = format(title, group, includeSeparators, rangeLabel, label);
+          await saveText(`${folder}/${base}.txt`, text);
+          savedFiles.push(base + ".txt");
+        }
+        if (fmt === "pdf" || fmt === "both") {
+          progress(`Saving PDF ${label || ""}… (loading pictures)`);
+          await Promise.allSettled(group.flatMap((i) => (i.images || []).map((im) => im.ready)).filter(Boolean));
+          const meta = { title: shownTitle, includeSeparators, count, fileBase: base, rangeLabel };
+          const payload = pdfPayload(group);
+          try {
+            if (!viaExtension()) throw new Error("no extension context");
+            await savePdfAuto(`${folder}/${base}.pdf`, meta, payload);
+            savedFiles.push(base + ".pdf");
+          } catch (e) {
+            if (split !== "none") throw e;
+            await savePdfDialog(meta, payload); // single file: fall back to the print dialog
+            savedFiles.push(base + ".pdf (via print dialog)");
+          }
+        }
+        savedMessages += count;
+      }
+
+      // Save every period that is fully loaded (or everything when final), then forget it to free memory.
+      async function flush(final) {
+        if (!final && split === "none") return;
+        const items = resolve(title, acc);
+        assignDays(items);
+        if (items.some((i) => i.day)) anyDates = true;
+        let cut = 0;
+        if (!final) {
+          const d0 = oldestDate(acc);
+          if (!d0) return;
+          cut = items.findIndex((it) => it.day && periodStart(it.day, split) > d0);
+          if (cut < 0) return;
+        }
+        const chunk = items.slice(cut);
+        const firstDay = (chunk.find((i) => i.day) || {}).day || null;
+        for (const it of chunk) if (!it.day) it.day = firstDay; // items above the first divider
+        const useRange = anyDates && (from || to);
+        const groups = new Map();
+        for (const it of chunk) {
+          if (useRange && it.day && ((from && it.day < from) || (to && it.day > to))) continue;
+          const k = periodKey(it.day, split);
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k).push(it);
+        }
+        // newest period first while scrolling back; files are named by period anyway
+        for (const [k, g] of groups) await savePeriod(k, g);
+        acc.splice(cut === 0 ? 0 : items[cut]._i);
+      }
+
+      collectNew(grid, acc);
       progress(`Found chat: ${title}\nCollected ${acc.length} rows…`);
 
       const scroller = loadAll ? findScroller(grid) : null;
@@ -513,7 +658,6 @@
         let stale = 0;
         for (let step = 1; step <= maxSteps && stale < 4 && !reachedFrom; step++) {
           const prevHeight = scroller.scrollHeight;
-          const prevFirst = acc[0] && acc[0].id;
           scroller.scrollTop = 0;
           scroller.dispatchEvent(new Event("scroll"));
           // wait for more history to load
@@ -523,43 +667,33 @@
             if (scroller.scrollHeight !== prevHeight) { grew = true; break; }
           }
           await sleep(250);
-          acc = merge(acc, snapshot(grid));
-          const progressed = grew || (acc[0] && acc[0].id !== prevFirst);
-          stale = progressed ? 0 : stale + 1;
+          const added = collectNew(grid, acc);
+          stale = grew || added ? 0 : stale + 1;
           const oldest = oldestDate(acc);
           if (from && oldest && oldest < from) reachedFrom = true;
-          progress(`Loading history… step ${step}/${maxSteps}\nCollected ${acc.length} rows` +
+          await flush(false);
+          progress(`Loading history… step ${step}/${maxSteps}\nRead ${seen.size} rows` +
             (oldest ? `\nOldest date reached: ${fmtDay(oldest)}` : "") +
-            (from ? `\nGoing back to: ${fmtDay(from)}` : ""));
+            (from ? `\nGoing back to: ${fmtDay(from)}` : "") +
+            (savedFiles.length ? `\nSaved ${savedFiles.length} file(s), latest: ${savedFiles[savedFiles.length - 1]}` : ""));
         }
       }
 
-      const items = applyRange(resolve(title, acc), from, to);
+      await flush(true);
+
       let note = "";
-      if ((from || to) && !acc.some((e) => e.data && e.data.date)) {
-        note = "Couldn't read any dates in this chat, so the date range was ignored.";
-      } else if (from && !reachedFrom && loadAll) {
-        note = `Didn't reach ${fmtDay(from)} (chat start or scroll limit reached first).`;
-      }
-      const { text, count } = format(title, items, includeSeparators, rangeLabel);
-      const safe = title.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 80) || "chat";
-      const fileBase = `messenger_${safe}_${new Date().toISOString().slice(0, 10)}`;
-      const saved = [];
-      if (fmt === "txt" || fmt === "both") {
-        download(fileBase + ".txt", text);
-        saved.push(fileBase + ".txt");
-      }
-      if (fmt === "pdf" || fmt === "both") {
-        await savePdf(title, items, includeSeparators, count, fileBase, keepPreview, rangeLabel);
-        saved.push(fileBase + ".pdf (via print dialog)");
-      }
-      const filename = saved.join(" and ");
-      progress(`Done! ${count} messages → ${filename}` + (note ? `\n${note}` : ""));
-      closeOverlay(note ? 10000 : 4000);
-      return { ok: true, count, filename, note };
+      if ((from || to) && !anyDates) note = "Couldn't read any dates in this chat, so the date range was ignored.";
+      else if (from && !reachedFrom && loadAll) note = `Didn't reach ${fmtDay(from)} (chat start or scroll limit reached first).`;
+      if (!savedFiles.length) note = (note ? note + "\n" : "") + "No messages matched, nothing was saved.";
+
+      const where = viaExtension() ? `Downloads/${folder}/` : "Downloads";
+      const filename = savedFiles.length <= 2 ? savedFiles.join(" and ") : `${savedFiles.length} files`;
+      progress(`Done! ${savedMessages} messages → ${filename}\nFolder: ${where}` + (note ? `\n${note}` : ""));
+      closeOverlay(note ? 10000 : 5000);
+      return { ok: true, count: savedMessages, filename: `${filename} in ${where}`, note };
     } catch (e) {
       progress("Error: " + e.message);
-      closeOverlay(8000);
+      closeOverlay(10000);
       return { ok: false, error: e.message };
     }
   };

@@ -14,6 +14,8 @@ $("export").addEventListener("click", async () => {
       loadAll: $("loadAll").checked,
       maxSteps: Math.max(1, parseInt($("maxSteps").value, 10) || 2000),
       includeSeparators: $("includeSeparators").checked,
+      split: $("split").value,
+      pictures: $("pictures").checked,
       from: $("from").value,
       to: $("to").value,
       format: document.querySelector('input[name="fmt"]:checked').value,

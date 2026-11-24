@@ -24,6 +24,14 @@
     <label><input type="radio" name="fmt" value="both"> Both</label>
   </div>
   <label style="display:flex"><input type="checkbox" id="loadAll" checked> Scroll up to load older messages</label>
+  <div class="row">Split into
+    <select id="split">
+      <option value="none">one file</option>
+      <option value="year">a file per year</option>
+      <option value="month">a file per month</option>
+    </select>
+  </div>
+  <label style="display:flex"><input type="checkbox" id="pictures" checked> Include pictures in PDF</label>
   <div class="row">From <input type="date" id="from"> To <input type="date" id="to"></div>
   <div class="hint" style="margin:-2px 0 6px">Leave empty for the whole chat. With a From date it stops scrolling once it passes that day.</div>
   <div class="row">Max scroll steps <input type="number" id="maxSteps" value="2000" min="1" max="10000"></div>
@@ -31,7 +39,8 @@
   <button id="export">Export open chat</button>
   <div id="status"></div>
   <p class="hint">Open a conversation on messenger.com or facebook.com/messages first.
-  Progress is shown on the page.<br>For PDF, a print dialog opens: choose <b>Save as PDF</b> as the printer. Pictures are included.</p>
+  Progress is shown on the page.<br>Files go to <b>Downloads/Messenger export/&lt;chat&gt;/</b>. With splitting, each year/month is saved as soon as it has fully loaded, so a crash doesn't lose finished parts.<br>
+PDFs are made automatically: Edge briefly shows a bar saying the extension "started debugging this browser" — that's expected.</p>
   <script src="popup.js"></script>
 </body>
 </html>

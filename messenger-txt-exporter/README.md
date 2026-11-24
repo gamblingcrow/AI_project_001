@@ -23,8 +23,17 @@ your browser; nothing is sent anywhere.
    to load history (progress shows in the top-right of the page), then saves
    `messenger_<Name>_<date>.txt` to your Downloads folder.
 
-**PDF:** after loading, Edge's print dialog opens. Set **Printer** to **Save as PDF**
-and click **Save**. Pictures are embedded and text stays selectable/searchable.
+**Where files go:** `Downloads/Messenger export/<chat name>/`.
+
+**PDF:** made automatically, no print dialog. While a PDF is being made, Edge briefly opens a
+background tab and shows a bar saying the extension "started debugging this browser"; that's
+how it saves the PDF and it closes by itself. Pictures are embedded and text stays selectable.
+Untick **Include pictures in PDF** for smaller files and lower memory use.
+
+**Split into a file per year / month:** recommended for long chats. While scrolling back,
+each year/month is saved as soon as it has fully loaded (e.g. `messenger_Alice_2025-03.txt`),
+and then dropped from the add-on's memory. If the tab crashes or you stop it, the finished
+periods are already saved.
 
 **Date range (optional):** set **From** and/or **To**. With a From date the add-on
 stops scrolling as soon as it passes that day, so you don't need to guess how far back to go.
@@ -50,6 +59,9 @@ Alice Smith: good, see this
 
 ## Limitations
 
+- Messenger itself keeps every loaded message on the page, so very long runs still make the
+  tab heavy. Splitting keeps the add-on's own memory low and saves progress, but for a chat
+  going back many years consider running it in stages with From/To dates.
 - Messenger's page layout is undocumented and changes often; if an update breaks
   detection, the selectors in `content.js` (`findGrid`, `parseRow`) are the place to adjust.
 - Only the timestamp separators Messenger shows in the chat are captured; per-message
