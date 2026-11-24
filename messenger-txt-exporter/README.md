@@ -50,24 +50,30 @@ the add-on scrolls down a bit and back up to wake it.
 **Keep the Messenger tab visible.** Edge slows background tabs to a crawl, so the export pauses
 while the tab is hidden and continues when you come back. Using another *window* is fine.
 
-**Hide already-read messages while scrolling** (on by default) hides messages the add-on has
-already read, so the page stays lighter; they are shown again when the export ends.
+**Lite mode while scrolling** (on by default) hides messages the add-on has already read, turns
+off animations and, when pictures aren't needed, stops drawing images, so the page stays lighter.
+Everything is restored when the export ends. It only changes how the page is drawn in your browser.
 
 **Max scroll steps** is a safety limit (each step loads one batch of older messages); raise it for very long chats.
 
 ## Output example
 
 ```
-Conversation: Alice Smith
-Exported: 11/23/2026, 10:25:10 AM
-Messages: 54
+Conversation: Chat with Alice, Bob
+Exported: 11/24/2026, 10:52:56 AM
+Period: August 2026
+Messages: 291
 ============================================================
---- Mon 10:15 AM ---
-Alice Smith: hey!
-You: hi, how are you?
-Alice Smith: good, see this
-             [photo]
+--- Saturday, August 1, 2026 ---
+[07:29] You: hey!
+[07:31] Alice: hi, how are you?
+[07:36] Bob (replying to "hi, how are you?"): good, see this
+[07:37] Bob: [photo]
 ```
+
+Sender and exact time come from the hidden accessibility line Messenger attaches to every
+message ("Message sent … by …"), so they are correct even in group chats, and messages are
+sorted by time. Unnamed group chats are titled after their members.
 
 ## Limitations
 
@@ -76,8 +82,6 @@ Alice Smith: good, see this
   going back many years consider running it in stages with From/To dates.
 - Messenger's page layout is undocumented and changes often; if an update breaks
   detection, the selectors in `content.js` (`findGrid`, `parseRow`) are the place to adjust.
-- Only the timestamp separators Messenger shows in the chat are captured; per-message
-  times appear only on hover, so they aren't included.
 - In the TXT file, photos, videos, voice messages and files appear as `[photo]`, `[video]`, etc.
   In the PDF, photos (and video preview frames) are shown as pictures; voice messages and files are noted as text.
 - PDF pictures are the sizes Messenger shows in the chat, not full-resolution originals.

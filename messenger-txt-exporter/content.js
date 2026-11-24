@@ -145,7 +145,7 @@
 
   function chatTitle(grid) {
     const label = grid.getAttribute("aria-label") || "";
-    const m = label.match(/conversation with (.+)$/i);
+    const m = label.match(/conversation (?:with|titled|named) (.+)$/i);
     if (m) return m[1].trim();
     const main = document.querySelector('[role="main"]');
     const h = main && main.querySelector("h1, h2");
@@ -153,8 +153,7 @@
     return document.title.replace(/^\(\d+\)\s*/, "").replace(/\s*[|•-]\s*(Messenger|Facebook).*$/i, "").trim() || "Messenger chat";
   }
 
-  // ---------- parsing a single row ----------
-  const NOISE = /^(Seen|Delivered|Sent|Enter|Seen by .*|Sent \d+.*ago)$/i;
+  const NOISE = /^(Seen|Delivered|Sent|Enter|Seen by .*|Sent \d+.*ago|Loading.*|Kraunama.*)$/i;
 
   function leafTexts(row) {
     const nodes = [...row.querySelectorAll('div[dir="auto"], span[dir="auto"]')];
@@ -211,6 +210,47 @@
     return { tags: [...new Set(tags)], images };
   }
 
+  // ---------- parsing a single row ----------
+  // Messenger puts a hidden screen-reader line in every message row, e.g.
+  //   "Enter, Message sent March 3, 2026, 9:15 AM by Alice: <text>"
+  // It gives the exact sender and time, so it is used whenever present (and never printed).
+  const A11Y = /^(?:enter,\s*)?message (?:sent|received)\s+(.+?)\s+by\s+(.+?)(?::\s+([\s\S]*))?$/i;
+  const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+  function parseTime(str) {
+    const s = str.replace(/ | /g, " ").trim();
+    const t = Date.parse(s.replace(/,\s*(\d{1,2}:\d{2})/, " $1").replace(/\bat\b/i, " "));
+    if (!isNaN(t)) return new Date(t);
+    const day = parseSepDate(s);
+    if (!day) return null;
+    const m = s.match(/(\d{1,2})[:.](\d{2})\s*([ap])?/i);
+    let h = m ? +m[1] : 0;
+    const min = m ? +m[2] : 0;
+    if (m && m[3]) {
+      const pm = /p/i.test(m[3]);
+      if (h === 12) h = pm ? 12 : 0;
+      else if (pm) h += 12;
+    }
+    return new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, min);
+  }
+
+  // A short "Aug 12, 2026, 11:23 AM"-style header Messenger shows above a group of messages.
+  const isDateHeader = (t) =>
+    t.length < 50 && /\d{1,2}[:.]\d{2}|\b(19|20)\d{2}\b/.test(t) && !!parseSepDate(t);
+
+  function findA11y(texts, row) {
+    for (let i = 0; i < texts.length; i++) {
+      const m = texts[i].match(A11Y);
+      if (m) return { index: i, raw: texts[i], m };
+    }
+    for (const e of row.querySelectorAll("[aria-label]")) {
+      const raw = e.getAttribute("aria-label").trim();
+      const m = raw.match(A11Y);
+      if (m) return { index: -1, raw, m };
+    }
+    return null;
+  }
+
   function parseRow(row, gridRect) {
     const headingText = [...row.querySelectorAll("h1,h2,h3,h4,h5,h6")]
       .map((h) => h.textContent.trim())
@@ -218,34 +258,72 @@
     const texts = leafTexts(row);
     const { tags: media, images } = collectMedia(row);
 
+    const a = findA11y(texts, row);
+    if (a) {
+      const [, time, whoRaw, bodyRaw = ""] = a.m;
+      const who = /^you$/i.test(whoRaw.trim()) ? "You" : whoRaw.trim();
+      const a11yBody = bodyRaw.trim();
+      const nb = norm(a11yBody), nWho = norm(who);
+      const rest = texts.filter((_, i) => i !== a.index);
+      // Find the visible bubble text that matches the hidden line (keeps line breaks and links).
+      let bodyIdx = -1;
+      if (a11yBody) {
+        bodyIdx = rest.findIndex((t) => t.trim() === a11yBody);
+        if (bodyIdx < 0 && nb) {
+          bodyIdx = rest.findIndex((t) => {
+            const nt = norm(t);
+            return nt && (nt === nb || (nt.length > 8 && (nb.startsWith(nt) || nt.startsWith(nb))));
+          });
+        }
+        if (bodyIdx < 0 && !nb) { // emoji-only message: the last emoji-only text is the bubble
+          for (let i = rest.length - 1; i >= 0; i--) if (rest[i].trim() && !norm(rest[i])) { bodyIdx = i; break; }
+        }
+      }
+      const pre = [], post = [];
+      rest.forEach((t, i) => {
+        if (i === bodyIdx) return;
+        const nt = norm(t);
+        if (!t.trim() || (nt && nt === nWho) || isDateHeader(t) || /replied to|original message/i.test(t)) return;
+        (bodyIdx < 0 || i < bodyIdx ? pre : post).push(t);
+      });
+      const body = bodyIdx >= 0 ? rest[bodyIdx] : a11yBody;
+      // Text above the message is the message it replies to; text below is e.g. a link preview.
+      const quote = pre.join(" ");
+      return {
+        type: "message", raw: a.raw, ts: parseTime(time), who, body, quote,
+        text: [body, ...post, ...media].filter(Boolean).join("\n"), media, images,
+      };
+    }
+
+    // ----- fallback when there is no hidden line (other languages / older layouts) -----
     let sender = null, side = null;
     for (const h of headingText) {
       if (/^you sent/i.test(h)) { sender = "You"; break; }
       const m = h.match(/^(.+?) sent\b/i) || h.match(/^(.+?) replied to\b/i);
       if (m) { sender = /^you$/i.test(m[1]) ? "You" : m[1]; break; }
     }
-
-    // Alignment fallback: outgoing bubbles are on the right.
     const bubble = row.querySelector('div[dir="auto"]') || row.querySelector("img, video");
     if (bubble && gridRect.width) {
       const r = bubble.getBoundingClientRect();
       if (r.width) side = r.left + r.width / 2 > gridRect.left + gridRect.width / 2 ? "right" : "left";
     }
-
-    if (!texts.length && !media.length) {
-      // Date/time separator or system line.
+    let bodyTexts = texts.filter((t) => !isDateHeader(t));
+    if (!bodyTexts.length && !media.length) {
       const t = (headingText.join(" ") || row.innerText || "").replace(/\s+/g, " ").trim();
-      if (t && t.length < 120 && !NOISE.test(t)) return { type: "separator", text: t, date: parseSepDate(t) };
+      if (t && t.length < 120 && !NOISE.test(t)) {
+        return { type: "separator", raw: "sep:" + t, text: t, date: parseSepDate(t) };
+      }
       return null;
     }
-
-    // A short name label shown above group-chat bubbles.
-    if (!sender && texts.length > 1 && side === "left" && texts[0].length < 40 && !/\s{2}/.test(texts[0])) {
+    if (!sender && bodyTexts.length > 1 && side === "left" && bodyTexts[0].length < 40) {
       const label = row.querySelector('span:not([dir="auto"])');
-      if (label && label.textContent.trim() === texts[0]) sender = texts.shift();
+      if (label && label.textContent.trim() === bodyTexts[0]) sender = bodyTexts.shift();
     }
-
-    return { type: "message", sender, side, text: [...texts, ...media].join("\n"), body: texts.join("\n"), media, images };
+    const body = bodyTexts.join("\n");
+    return {
+      type: "message", raw: `row:${sender || side}:${body}:${media.join()}:${images.map((i) => i.src).join()}`,
+      ts: null, sender, side, body, quote: "", text: [body, ...media].filter(Boolean).join("\n"), media, images,
+    };
   }
 
   // ---------- reading dates from Messenger's dividers ----------
@@ -310,54 +388,87 @@
     return isNaN(p) ? null : dayStart(new Date(p));
   }
 
-  // Date of the oldest divider collected so far (dividers are in chronological order).
-  function oldestDate(acc) {
-    for (const e of acc) if (e.data && e.data.date) return e.data.date;
-    return null;
-  }
-
-  // Give every item the date of the divider above it and keep only items inside [from, to].
-  function applyRange(items, from, to) {
-    if (!from && !to) return items;
-    let current = (items.find((i) => i.date) || {}).date || null; // items above the first divider
-    const out = [];
-    for (const it of items) {
-      if (it.type === "separator" && it.date) current = it.date;
-      if (!current) { if (!from) out.push(it); continue; }
-      if (from && current < from) continue;
-      if (to && current > to) continue;
-      out.push(it);
-    }
-    return out;
-  }
-
   const fmtDay = (d) => d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const fmtLongDay = (d) => d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const fmtTime = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   const parseInputDate = (v) => {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || "");
     return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
   };
 
-  // ---------- incremental collection (each row is read once) ----------
-  let idSeq = 0;
-  const ids = new WeakMap();
-  const idOf = (el) => { if (!ids.has(el)) ids.set(el, ++idSeq); return ids.get(el); };
-  const seen = new Set();
+  // ---------- collecting ----------
+  // Messages are stored by identity (the hidden "Message sent … by …" line), not by DOM position,
+  // so rows that Messenger re-renders, re-orders or inserts below its "Loading…" row can't be
+  // duplicated or misplaced. Everything is sorted by time when saving.
+  const records = new Map();      // key -> record
+  const doneKeys = new Set();     // keys already written to a file (or outside the date range)
+  const rowCache = new WeakMap(); // row element -> { sig, parsed }
+  const senders = new Set();
+  let snapNo = 0, minTs = null;
 
-  // New rows above the already-known ones are older history (prepended);
-  // new rows below them are messages that arrived meanwhile (appended).
-  function collectNew(grid, acc) {
+  // full = re-check rows that were parsed before (catches rows Messenger reused for another message)
+  function collect(grid, full) {
+    snapNo++;
     const gridRect = grid.getBoundingClientRect();
-    const before = [], after = [];
-    let passedKnown = false;
-    for (const row of getRows(grid)) {
-      const id = idOf(row);
-      if (seen.has(id)) { passedKnown = true; continue; }
-      seen.add(id);
-      (passedKnown ? after : before).push({ id, data: parseRow(row, gridRect) });
+    const rows = getRows(grid);
+    const occurrences = new Map();
+    const fresh = [];
+    let added = 0;
+    rows.forEach((row, idx) => {
+      let c = rowCache.get(row);
+      if (!c || full) {
+        const sig = row.textContent.length + ":" + row.querySelectorAll("img").length;
+        if (!c || c.sig !== sig) {
+          c = { sig, parsed: parseRow(row, gridRect) };
+          rowCache.set(row, c);
+        }
+      }
+      const p = c.parsed;
+      if (!p) return;
+      const n = (occurrences.get(p.raw) || 0) + 1; // identical messages in the same minute stay separate
+      occurrences.set(p.raw, n);
+      const key = p.raw + "#" + n;
+      if (records.has(key) || doneKeys.has(key)) { fresh.push(records.get(key) || null); return; }
+      const rec = { ...p, key, snap: snapNo, idx };
+      records.set(key, rec);
+      fresh.push(rec);
+      added++;
+    });
+    // Rows without their own time take it from neighbours in the same snapshot (DOM order).
+    let carry = null;
+    for (const r of fresh) {
+      if (!r) continue;
+      if (r.ts) carry = r.ts;
+      else if (r.type === "separator" && r.date) { carry = r.date; r.ts = r.date; }
+      else if (carry && r.snap === snapNo) r.ts = carry;
     }
-    if (before.length) acc.unshift(...before);
-    if (after.length) acc.push(...after);
-    return before.length + after.length;
+    carry = null;
+    for (let i = fresh.length - 1; i >= 0; i--) {
+      const r = fresh[i];
+      if (!r) continue;
+      if (r.ts) carry = r.ts;
+      else if (carry && r.snap === snapNo) r.ts = carry;
+    }
+    for (const r of fresh) {
+      if (r && r.snap === snapNo) {
+        if (r.ts && (!minTs || r.ts < minTs)) minTs = r.ts;
+        if (r.who && r.who !== "You") senders.add(r.who);
+      }
+    }
+    return added;
+  }
+
+  const byTime = (a, b) => (a.ts && b.ts && a.ts - b.ts) || b.snap - a.snap || a.idx - b.idx;
+
+  // Fallback sender guess for rows without the hidden line (group chats name only the first of a run).
+  function fillSenders(items, title) {
+    let lastLeft = null;
+    for (const it of items) {
+      if (it.type !== "message") continue;
+      if (!it.who) it.who = it.sender || (it.side === "right" ? "You" : (lastLeft || title));
+      if (it.who !== "You") lastLeft = it.who;
+    }
   }
 
   // Hide rows that were already read (except the oldest few at the top) so Messenger has
@@ -367,7 +478,7 @@
     const rows = getRows(grid);
     for (let i = keep; i < rows.length; i++) {
       const r = rows[i];
-      if (r.style.display !== "none" && seen.has(idOf(r))) {
+      if (r.style.display !== "none" && rowCache.has(r)) {
         r.style.display = "none";
         hiddenRows.push(new WeakRef(r));
       }
@@ -378,74 +489,71 @@
       const r = ref.deref();
       if (r) r.style.display = "";
     }
+    document.getElementById("__mtx_lite")?.remove();
+    document.querySelector("[data-mtx-grid]")?.removeAttribute("data-mtx-grid");
   }
 
-  // ---------- formatting ----------
-  // Fill in senders (group chats only name the first message of a run) and remember each item's index.
-  function resolve(title, entries) {
-    let lastLeft = null;
-    const out = [];
-    entries.forEach(({ data }, i) => {
-      if (!data) return;
-      if (data.type === "separator") { out.push({ ...data, _i: i }); return; }
-      let who = data.sender;
-      if (!who) who = data.side === "right" ? "You" : (lastLeft || title);
-      if (who !== "You") lastLeft = who;
-      out.push({ ...data, who, _i: i });
-    });
-    return out;
+  // "Lite mode" while exporting: no animations, and no image drawing when pictures aren't needed.
+  // Only changes how the page is drawn in this browser; undone when the export ends.
+  function liteMode(grid, hideImages) {
+    grid.setAttribute("data-mtx-grid", "");
+    const st = document.createElement("style");
+    st.id = "__mtx_lite";
+    st.textContent =
+      "*,*::before,*::after{animation:none!important;transition:none!important}" +
+      (hideImages ? "[data-mtx-grid] img,[data-mtx-grid] video{visibility:hidden!important}" : "");
+    document.head.appendChild(st);
   }
 
-  // Each item gets the date of the divider above it (null before the first readable divider).
-  function assignDays(items) {
-    let current = null;
-    for (const it of items) {
-      if (it.type === "separator" && it.date) current = it.date;
-      it.day = current;
-    }
-  }
-
-  const pad2 = (n) => String(n).padStart(2, "0");
+  // ---------- periods ----------
   function periodKey(d, split) {
     if (split === "none") return "all";
     if (!d) return "undated";
     return split === "year" ? `${d.getFullYear()}` : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
   }
   function periodLabel(key, split) {
-    if (key === "all" || key === "undated") return key === "undated" ? "undated" : "";
-    if (split === "year") return key;
+    if (key === "all") return "";
+    if (key === "undated" || split === "year") return key;
     const [y, m] = key.split("-").map(Number);
     return new Date(y, m - 1, 1).toLocaleDateString(undefined, { year: "numeric", month: "long" });
   }
   const periodStart = (d, split) =>
     split === "year" ? new Date(d.getFullYear(), 0, 1) : new Date(d.getFullYear(), d.getMonth(), 1);
 
-  function format(title, items, includeSeparators, rangeLabel, periodLabel) {
+  // ---------- text output ----------
+  const short = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+  function format(title, items, includeSeparators, rangeLabel, periodLabelText) {
+    const timed = items.some((i) => i.type === "message" && i.ts);
     const lines = [];
-    let count = 0;
-    for (const data of items) {
-      if (data.type === "separator") {
-        if (includeSeparators) lines.push("", `--- ${data.text} ---`);
+    let count = 0, lastDay = null;
+    for (const it of items) {
+      if (it.type === "separator") {
+        if (!timed && includeSeparators) lines.push("", `--- ${it.text} ---`);
         continue;
       }
-      const who = data.who;
-      const [first, ...rest] = data.text.split("\n");
-      lines.push(`${who}: ${first}`);
-      for (const r of rest) lines.push(`${" ".repeat(who.length + 2)}${r}`);
+      if (timed && it.ts && includeSeparators) {
+        const d = it.ts.toDateString();
+        if (d !== lastDay) { lines.push("", `--- ${fmtLongDay(it.ts)} ---`); lastDay = d; }
+      }
+      const head = `${it.ts && timed ? `[${fmtTime(it.ts)}] ` : ""}${it.who}` +
+        (it.quote ? ` (replying to "${short(it.quote)}")` : "") + ": ";
+      const [first = "", ...rest] = (it.text || "").split("\n");
+      lines.push(head + first);
+      for (const r of rest) lines.push(" ".repeat(Math.min(head.length, 12)) + r);
       count++;
     }
     const header = [
       `Conversation: ${title}`,
       `Exported: ${new Date().toLocaleString()}`,
       `Source: ${location.href}`,
-      ...(periodLabel ? [`Period: ${periodLabel}`] : []),
+      ...(periodLabelText ? [`Period: ${periodLabelText}`] : []),
       ...(rangeLabel ? [`Range: ${rangeLabel}`] : []),
       `Messages: ${count}`,
       "=".repeat(60),
     ];
     return { text: header.join("\n") + "\n" + lines.join("\n").replace(/^\n+/, "") + "\n", count };
   }
-
 
   // ---------- saving files ----------
   const viaExtension = () => typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id;
@@ -472,7 +580,9 @@
     return items.map((it) =>
       it.type === "separator"
         ? { type: "separator", text: it.text }
-        : { type: "message", who: it.who, body: it.body, media: it.media,
+        : { type: "message", who: it.who, body: it.body, quote: it.quote || "", media: it.media,
+            ts: it.ts ? it.ts.getTime() : null,
+            time: it.ts ? fmtTime(it.ts) : "", day: it.ts ? fmtLongDay(it.ts) : "",
             images: (it.images || []).map((im) => ({ src: im.src, label: im.label })) }
     );
   }
@@ -518,6 +628,8 @@
     .bubble.media { background: none; padding: 0; }
     img { display: block; max-width: 320px; max-height: 360px; border-radius: 10px; margin: 3px 0; }
     .tag { color: #888; font-style: italic; font-size: 9pt; margin: 2px 10px; }
+    .quote { max-width: 70%; font-size: 8.5pt; color: #666; border-left: 3px solid #ccc; padding: 1px 8px;
+             margin: 2px 10px 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
     * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }`;
 
   function el(doc, tag, cls, text) {
@@ -536,16 +648,27 @@
     h.appendChild(el(doc, "h1", null, title));
     h.appendChild(el(doc, "p", null, `Exported ${new Date().toLocaleString()} · ${count} messages` + (rangeLabel ? ` · ${rangeLabel}` : "")));
     b.appendChild(h);
-    let prevWho = null;
+    const timed = items.some((i) => i.type === "message" && i.day);
+    let prevWho = null, prevTs = 0, lastDay = null;
     for (const it of items) {
       if (it.type === "separator") {
-        if (includeSeparators) b.appendChild(el(doc, "div", "sep", it.text));
+        if (includeSeparators && !timed) b.appendChild(el(doc, "div", "sep", it.text));
         prevWho = null;
         continue;
       }
+      if (timed && it.day && it.day !== lastDay) {
+        if (includeSeparators) b.appendChild(el(doc, "div", "sep", it.day));
+        lastDay = it.day;
+        prevWho = null;
+      }
       const m = el(doc, "div", "msg" + (it.who === "You" ? " me" : ""));
-      if (it.who !== prevWho) m.appendChild(el(doc, "div", "who", it.who));
+      // name (and time) when the sender changes or after a 10-minute gap
+      if (it.who !== prevWho || (it.ts && it.ts - prevTs > 10 * 60 * 1000)) {
+        m.appendChild(el(doc, "div", "who", it.time ? `${it.who} · ${it.time}` : it.who));
+      }
       prevWho = it.who;
+      prevTs = it.ts || prevTs;
+      if (it.quote) m.appendChild(el(doc, "div", "quote", "↪ " + it.quote));
       if (it.body) m.appendChild(el(doc, "div", "bubble", it.body));
       for (const im of it.images || []) {
         const box = el(doc, "div", "bubble media");
@@ -598,8 +721,10 @@
   window.__mtxParseDate = parseSepDate; // handy for troubleshooting from the console
 
   // ---------- main ----------
+  const GENERIC_TITLE = /^(messenger|facebook|chats?|messages?|)$/i;
+
   window.__messengerTxtExport = async ({
-    loadAll = true, maxSteps = 2000, includeSeparators = true, format: fmt = "txt",
+    loadAll = true, maxSteps = 20000, includeSeparators = true, format: fmt = "txt",
     from: fromStr = "", to: toStr = "", split = "none", pictures = true,
     stallSeconds = 90, lighten = true,
   } = {}) => {
@@ -608,6 +733,7 @@
       wantPictures = pictures && fmt !== "txt";
       const from = parseInputDate(fromStr), to = parseInputDate(toStr);
       if (from && to && from > to) return { ok: false, error: "The From date is after the To date." };
+      const toEnd = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1) : null;
       const rangeLabel = from || to ? `${from ? fmtDay(from) : "start"} – ${to ? fmtDay(to) : "now"}` : "";
 
       const grid = findGrid();
@@ -617,18 +743,30 @@
         closeOverlay(15000);
         return { ok: false, error: "No open conversation found. Open a chat first.\n" + diag };
       }
-      const title = chatTitle(grid);
-      const safe = title.replace(/[\\/:*?"<>|~\u0000-\u001f]+/g, "_").replace(/^[.\s]+|[.\s]+$/g, "").slice(0, 80) || "chat";
+      let title = chatTitle(grid);
       const stamp = new Date().toISOString().slice(0, 10);
-      const folder = `Messenger export/${safe}`;
+      let safe = null, folder = null;
 
-      const acc = [];
+      // Unnamed group chats show up as just "Messenger": name them after the people in them.
+      function fixTitle() {
+        if (safe) return;
+        if (GENERIC_TITLE.test(title.trim())) {
+          const names = [...senders];
+          title = names.length
+            ? "Chat with " + names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "")
+            : "Messenger chat";
+        }
+        safe = title.replace(/[\\/:*?"<>|~\u0000-\u001f]+/g, "_").replace(/^[.\s]+|[.\s]+$/g, "").slice(0, 80) || "chat";
+        folder = `Messenger export/${safe}`;
+      }
+
       const savedFiles = [];
-      let savedMessages = 0, anyDates = false, reachedFrom = false;
+      let savedMessages = 0, reachedFrom = false;
 
       async function savePeriod(key, group) {
         const count = group.filter((i) => i.type === "message").length;
         if (!count) return;
+        fixTitle();
         const label = periodLabel(key, split);
         const base = `messenger_${safe}_${key === "all" ? stamp : key}`;
         const shownTitle = label ? `${title} — ${label}` : title;
@@ -656,41 +794,34 @@
       }
 
       // Save every period that is fully loaded (or everything when final), then forget it to free memory.
+      // A period is complete once something older than its start has been loaded.
       async function flush(final) {
         if (!final && split === "none") return;
-        const items = resolve(title, acc);
-        assignDays(items);
-        if (items.some((i) => i.day)) anyDates = true;
-        let cut = 0;
-        if (!final) {
-          const d0 = oldestDate(acc);
-          if (!d0) return;
-          cut = items.findIndex((it) => it.day && periodStart(it.day, split) > d0);
-          if (cut < 0) return;
-        }
-        const chunk = items.slice(cut);
-        const firstDay = (chunk.find((i) => i.day) || {}).day || null;
-        for (const it of chunk) if (!it.day) it.day = firstDay; // items above the first divider
-        const useRange = anyDates && (from || to);
+        if (!final && !minTs) return;
+        const items = [...records.values()].sort(byTime);
+        fillSenders(items, title);
+        const ready = final ? items : items.filter((it) => it.ts && periodStart(it.ts, split) > minTs);
+        if (!ready.length) return;
         const groups = new Map();
-        for (const it of chunk) {
-          if (useRange && it.day && ((from && it.day < from) || (to && it.day > to))) continue;
-          const k = periodKey(it.day, split);
+        for (const it of ready) {
+          records.delete(it.key);
+          doneKeys.add(it.key);
+          if (it.ts && ((from && it.ts < from) || (toEnd && it.ts >= toEnd))) continue;
+          const k = periodKey(it.ts, split);
           if (!groups.has(k)) groups.set(k, []);
           groups.get(k).push(it);
         }
-        // newest period first while scrolling back; files are named by period anyway
         for (const [k, g] of groups) await savePeriod(k, g);
-        acc.splice(cut === 0 ? 0 : items[cut]._i);
       }
 
-      collectNew(grid, acc);
-      progress(`Found chat: ${title}\nCollected ${acc.length} rows…`);
+      if (lighten) liteMode(grid, !wantPictures);
+      collect(grid, true);
+      progress(`Found chat: ${title}\nRead ${records.size} rows…`);
 
       const scroller = loadAll ? findScroller(grid) : null;
       if (loadAll && !scroller) progress("Couldn't find the scroll area; exporting visible messages only.");
 
-      let stopReason = scroller ? "" : "visible";
+      let stopReason = "";
       if (scroller) {
         let lastNewAt = Date.now();
         for (let step = 1; ; step++) {
@@ -700,15 +831,14 @@
 
           // Background tabs are throttled by the browser: pause instead of mistaking it for the end.
           if (document.hidden) {
-            progress(`Paused: the Messenger tab is in the background.\nSwitch back to it to continue.\nRead ${seen.size} rows so far.`);
+            progress(`Paused: the Messenger tab is in the background.\nSwitch back to it to continue.\nRead ${records.size + doneKeys.size} rows so far.`);
             while (document.hidden && !userStop) await sleep(1000);
             lastNewAt = Date.now();
             continue;
           }
 
           const prevHeight = scroller.scrollHeight;
-          const waiting = Date.now() - lastNewAt;
-          if (waiting > 3000) {
+          if (Date.now() - lastNewAt > 3000) {
             // Nudge: scroll down a bit and back up, so Messenger notices it should load more.
             scroller.scrollTop = Math.min(800, Math.max(200, scroller.clientHeight));
             scroller.dispatchEvent(new Event("scroll"));
@@ -722,17 +852,16 @@
             if (scroller.scrollHeight !== prevHeight) break;
           }
           await sleep(250);
-          const added = collectNew(grid, acc);
+          const added = collect(grid, step % 10 === 0);
           if (added) lastNewAt = Date.now();
           else if (!document.hidden && Date.now() - lastNewAt > stallSeconds * 1000) { stopReason = "stalled"; break; }
 
-          const oldest = oldestDate(acc);
-          if (from && oldest && oldest < from) reachedFrom = true;
+          if (from && minTs && minTs < from) reachedFrom = true;
           await flush(false);
           if (lighten) hideReadRows(grid);
           const idle = Math.round((Date.now() - lastNewAt) / 1000);
-          progress(`Loading history… step ${step}\nRead ${seen.size} rows` +
-            (oldest ? `\nOldest date reached: ${fmtDay(oldest)}` : "") +
+          progress(`Loading history… step ${step}\nRead ${records.size + doneKeys.size} rows` +
+            (minTs ? `\nOldest reached: ${fmtDay(minTs)}` : "") +
             (from ? `\nGoing back to: ${fmtDay(from)}` : "") +
             (idle >= 5 ? `\nWaiting for Messenger to load more… ${idle}s (gives up at ${stallSeconds}s)` : "") +
             (savedFiles.length ? `\nSaved ${savedFiles.length} file(s), latest: ${savedFiles[savedFiles.length - 1]}` : ""));
@@ -743,16 +872,16 @@
       unhideRows();
 
       const notes = [];
-      if ((from || to) && !anyDates) notes.push("Couldn't read any dates in this chat, so the date range was ignored.");
+      if ((from || to) && !minTs) notes.push("Couldn't read any dates in this chat, so the date range was ignored.");
       if (stopReason === "stalled") {
         notes.push(`Stopped because Messenger loaded nothing new for ${stallSeconds}s` +
           (from && !reachedFrom ? ` (before reaching ${fmtDay(from)}).` : " — most likely the start of the chat."));
       } else if (stopReason === "steps") notes.push("Stopped at the scroll step limit.");
       else if (stopReason === "user") notes.push("Stopped by you.");
-      let note = notes.join("\n");
-      if (!savedFiles.length) note = (note ? note + "\n" : "") + "No messages matched, nothing was saved.";
+      if (!savedFiles.length) notes.push("No messages matched, nothing was saved.");
+      const note = notes.join("\n");
 
-      const where = viaExtension() ? `Downloads/${folder}/` : "Downloads";
+      const where = viaExtension() && folder ? `Downloads/${folder}/` : "Downloads";
       const filename = savedFiles.length <= 2 ? savedFiles.join(" and ") : `${savedFiles.length} files`;
       progress(`Done! ${savedMessages} messages → ${filename}\nFolder: ${where}` + (note ? `\n${note}` : ""), true);
       closeOverlay(note ? 15000 : 5000);
