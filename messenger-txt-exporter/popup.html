@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <style>
-    body { font: 13px system-ui, sans-serif; width: 280px; margin: 12px; color: #1c1e21; }
+    body { font: 13px system-ui, sans-serif; width: 300px; margin: 12px; color: #1c1e21; }
     h1 { font-size: 15px; margin: 0 0 10px; }
     label { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; }
     .row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
     input[type=number] { width: 64px; }
+    input[type=date] { width: 112px; font-size: 12px; }
     button { width: 100%; padding: 8px; margin-top: 8px; border: 0; border-radius: 6px;
              background: #0078ff; color: #fff; font-weight: 600; cursor: pointer; }
     button:disabled { background: #9bbcf0; cursor: default; }
@@ -23,7 +24,9 @@
     <label><input type="radio" name="fmt" value="both"> Both</label>
   </div>
   <label style="display:flex"><input type="checkbox" id="loadAll" checked> Scroll up to load older messages</label>
-  <div class="row">Max scroll steps <input type="number" id="maxSteps" value="300" min="1" max="10000"></div>
+  <div class="row">From <input type="date" id="from"> To <input type="date" id="to"></div>
+  <div class="hint" style="margin:-2px 0 6px">Leave empty for the whole chat. With a From date it stops scrolling once it passes that day.</div>
+  <div class="row">Max scroll steps <input type="number" id="maxSteps" value="2000" min="1" max="10000"></div>
   <label style="display:flex"><input type="checkbox" id="includeSeparators" checked> Include date/time separators</label>
   <button id="export">Export open chat</button>
   <div id="status"></div>

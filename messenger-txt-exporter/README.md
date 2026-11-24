@@ -26,7 +26,13 @@ your browser; nothing is sent anywhere.
 **PDF:** after loading, Edge's print dialog opens. Set **Printer** to **Save as PDF**
 and click **Save**. Pictures are embedded and text stays selectable/searchable.
 
-For very long chats, raise **Max scroll steps** (each step loads one batch of older messages).
+**Date range (optional):** set **From** and/or **To**. With a From date the add-on
+stops scrolling as soon as it passes that day, so you don't need to guess how far back to go.
+Dates come from the dividers Messenger shows between message groups ("Today", "Mon 10:15",
+"Nov 3, 2025", "lapkričio 3 d." …), in English or Lithuanian. Each message gets the date of the
+divider above it. If no dates can be read, the whole loaded chat is exported and the popup says so.
+
+**Max scroll steps** is a safety limit (each step loads one batch of older messages); raise it for very long chats.
 
 ## Output example
 

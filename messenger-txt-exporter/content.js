@@ -214,7 +214,7 @@
     if (!texts.length && !media.length) {
       // Date/time separator or system line.
       const t = (headingText.join(" ") || row.innerText || "").replace(/\s+/g, " ").trim();
-      if (t && t.length < 120 && !NOISE.test(t)) return { type: "separator", text: t };
+      if (t && t.length < 120 && !NOISE.test(t)) return { type: "separator", text: t, date: parseSepDate(t) };
       return null;
     }
 
@@ -226,6 +226,95 @@
 
     return { type: "message", sender, side, text: [...texts, ...media].join("\n"), body: texts.join("\n"), media, images };
   }
+
+  // ---------- reading dates from Messenger's dividers ----------
+  // Handles English and Lithuanian forms: "Today", "Yesterday", "Mon 10:15", "Nov 3, 2025, 4:12 PM",
+  // "lapkričio 3 d.", "2025-11-03 16:12", "11/3/25", "3.11.2025", or just a time (= today).
+  const MONTHS = [
+    ["january", 0], ["february", 1], ["march", 2], ["april", 3], ["june", 5], ["july", 6], ["august", 7],
+    ["september", 8], ["october", 9], ["november", 10], ["december", 11],
+    ["saus", 0], ["vas", 1], ["kov", 2], ["bal", 3], ["geg", 4], ["birž", 5], ["birz", 5], ["liep", 6],
+    ["rugp", 7], ["rugs", 8], ["spal", 9], ["lapkr", 10], ["gruod", 11],
+    ["jan", 0], ["feb", 1], ["mar", 2], ["apr", 3], ["may", 4], ["jun", 5], ["jul", 6], ["aug", 7],
+    ["sep", 8], ["oct", 9], ["nov", 10], ["dec", 11],
+  ];
+  const WEEKDAYS = [
+    ["sunday", 0], ["monday", 1], ["tuesday", 2], ["wednesday", 3], ["thursday", 4], ["friday", 5], ["saturday", 6],
+    ["sekmad", 0], ["pirmad", 1], ["antrad", 2], ["trečiad", 3], ["treciad", 3], ["ketvirtad", 4], ["penktad", 5],
+    ["šeštad", 6], ["sestad", 6],
+    ["sun", 0], ["mon", 1], ["tue", 2], ["wed", 3], ["thu", 4], ["fri", 5], ["sat", 6],
+  ];
+  const WEEKDAY_ABBR_LT = { sk: 0, pr: 1, an: 2, tr: 3, kt: 4, pn: 5, "št": 6 };
+  const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  function parseSepDate(text) {
+    const now = new Date(), today = dayStart(now);
+    const t = text.toLowerCase().replace(/\u202f|\u00a0/g, " ");
+    if (/(^|[^\p{L}])(today|šiandien)/u.test(t)) return today;
+    if (/(^|[^\p{L}])(yesterday|vakar)/u.test(t)) return new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+
+    let m = t.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+    const fixYear = (y) => (y < 100 ? 2000 + y : y);
+    m = t.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+    if (m) return new Date(fixYear(+m[3]), +m[1] - 1, +m[2]);
+    m = t.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/);
+    if (m) return new Date(fixYear(+m[3]), +m[2] - 1, +m[1]);
+
+    const noTime = t.replace(/\d{1,2}[:.]\d{2}(\s*[ap]\.?m\.?)?/g, " ");
+    const words = noTime.split(/[^\p{L}\d]+/u).filter(Boolean);
+
+    for (const w of words) {
+      const hit = MONTHS.find(([k]) => w.startsWith(k));
+      if (!hit || /\d/.test(w)) continue;
+      const yearM = noTime.match(/\b(19|20)\d{2}\b/);
+      const dayM = noTime.replace(/\b(19|20)\d{2}\b/, " ").match(/\b(\d{1,2})\b/);
+      if (!dayM) continue;
+      let d = new Date(yearM ? +yearM[0] : today.getFullYear(), hit[1], +dayM[1]);
+      if (!yearM && d > today) d = new Date(d.getFullYear() - 1, d.getMonth(), d.getDate());
+      return d;
+    }
+
+    for (const w of words) {
+      let wd = WEEKDAYS.find(([k]) => w.startsWith(k));
+      wd = wd ? wd[1] : WEEKDAY_ABBR_LT[w];
+      if (wd === undefined) continue;
+      let back = (today.getDay() - wd + 7) % 7 || 7;
+      return new Date(today.getFullYear(), today.getMonth(), today.getDate() - back);
+    }
+
+    // Only a time ("10:15 AM") means today.
+    if (/^\s*\d{1,2}[:.]\d{2}(\s*[ap]\.?m\.?)?\s*$/.test(t)) return today;
+    const p = Date.parse(text.replace(/\bat\b/gi, " "));
+    return isNaN(p) ? null : dayStart(new Date(p));
+  }
+
+  // Date of the oldest divider collected so far (dividers are in chronological order).
+  function oldestDate(acc) {
+    for (const e of acc) if (e.data && e.data.date) return e.data.date;
+    return null;
+  }
+
+  // Give every item the date of the divider above it and keep only items inside [from, to].
+  function applyRange(items, from, to) {
+    if (!from && !to) return items;
+    let current = (items.find((i) => i.date) || {}).date || null; // items above the first divider
+    const out = [];
+    for (const it of items) {
+      if (it.type === "separator" && it.date) current = it.date;
+      if (!current) { if (!from) out.push(it); continue; }
+      if (from && current < from) continue;
+      if (to && current > to) continue;
+      out.push(it);
+    }
+    return out;
+  }
+
+  const fmtDay = (d) => d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const parseInputDate = (v) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || "");
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  };
 
   // ---------- incremental collection (survives list virtualization) ----------
   let idSeq = 0;
@@ -268,7 +357,7 @@
     return out;
   }
 
-  function format(title, items, includeSeparators) {
+  function format(title, items, includeSeparators, rangeLabel) {
     const lines = [];
     let count = 0;
     for (const data of items) {
@@ -286,6 +375,7 @@
       `Conversation: ${title}`,
       `Exported: ${new Date().toLocaleString()}`,
       `Source: ${location.href}`,
+      ...(rangeLabel ? [`Range: ${rangeLabel}`] : []),
       `Messages: ${count}`,
       "=".repeat(60),
     ];
@@ -330,14 +420,14 @@
     return e;
   }
 
-  function buildPdfDoc(doc, title, items, includeSeparators, count, fileBase) {
+  function buildPdfDoc(doc, title, items, includeSeparators, count, fileBase, rangeLabel) {
     doc.title = fileBase;
     const style = el(doc, "style", null, PDF_CSS);
     doc.head.appendChild(style);
     const b = doc.body;
     const h = el(doc, "header");
     h.appendChild(el(doc, "h1", null, title));
-    h.appendChild(el(doc, "p", null, `Exported ${new Date().toLocaleString()} · ${count} messages`));
+    h.appendChild(el(doc, "p", null, `Exported ${new Date().toLocaleString()} · ${count} messages` + (rangeLabel ? ` · ${rangeLabel}` : "")));
     b.appendChild(h);
     let prevWho = null;
     for (const it of items) {
@@ -370,7 +460,7 @@
     return Promise.race([all, sleep(timeoutMs)]);
   }
 
-  async function savePdf(title, items, includeSeparators, count, fileBase, keepPreview) {
+  async function savePdf(title, items, includeSeparators, count, fileBase, keepPreview, rangeLabel) {
     progress("Preparing PDF (loading pictures)…");
     await Promise.allSettled(pendingImages);
     const iframe = document.createElement("iframe");
@@ -380,7 +470,7 @@
       : "position:fixed;right:0;bottom:0;width:900px;height:700px;opacity:0;pointer-events:none;border:0;z-index:-1";
     document.body.appendChild(iframe);
     const doc = iframe.contentDocument;
-    buildPdfDoc(doc, title, items, includeSeparators, count, fileBase);
+    buildPdfDoc(doc, title, items, includeSeparators, count, fileBase, rangeLabel);
     await waitForImages(doc);
     // Replace pictures that failed to load with a note.
     for (const img of doc.images) {
@@ -396,9 +486,15 @@
     setTimeout(() => iframe.remove(), 2000);
   }
 
+  window.__mtxParseDate = parseSepDate; // handy for troubleshooting from the console
+
   // ---------- main ----------
-  window.__messengerTxtExport = async ({ loadAll = true, maxSteps = 300, includeSeparators = true, format: fmt = "txt", keepPreview = false } = {}) => {
+  window.__messengerTxtExport = async ({ loadAll = true, maxSteps = 300, includeSeparators = true, format: fmt = "txt", keepPreview = false, from: fromStr = "", to: toStr = "" } = {}) => {
     try {
+      const from = parseInputDate(fromStr), to = parseInputDate(toStr);
+      if (from && to && from > to) return { ok: false, error: "The From date is after the To date." };
+      const rangeLabel = from || to ? `${from ? fmtDay(from) : "start"} – ${to ? fmtDay(to) : "now"}` : "";
+      let reachedFrom = false;
       const grid = findGrid();
       if (!grid) {
         const diag = diagnostics();
@@ -415,7 +511,7 @@
 
       if (scroller) {
         let stale = 0;
-        for (let step = 1; step <= maxSteps && stale < 4; step++) {
+        for (let step = 1; step <= maxSteps && stale < 4 && !reachedFrom; step++) {
           const prevHeight = scroller.scrollHeight;
           const prevFirst = acc[0] && acc[0].id;
           scroller.scrollTop = 0;
@@ -430,12 +526,22 @@
           acc = merge(acc, snapshot(grid));
           const progressed = grew || (acc[0] && acc[0].id !== prevFirst);
           stale = progressed ? 0 : stale + 1;
-          progress(`Loading history… step ${step}/${maxSteps}\nCollected ${acc.length} rows`);
+          const oldest = oldestDate(acc);
+          if (from && oldest && oldest < from) reachedFrom = true;
+          progress(`Loading history… step ${step}/${maxSteps}\nCollected ${acc.length} rows` +
+            (oldest ? `\nOldest date reached: ${fmtDay(oldest)}` : "") +
+            (from ? `\nGoing back to: ${fmtDay(from)}` : ""));
         }
       }
 
-      const items = resolve(title, acc);
-      const { text, count } = format(title, items, includeSeparators);
+      const items = applyRange(resolve(title, acc), from, to);
+      let note = "";
+      if ((from || to) && !acc.some((e) => e.data && e.data.date)) {
+        note = "Couldn't read any dates in this chat, so the date range was ignored.";
+      } else if (from && !reachedFrom && loadAll) {
+        note = `Didn't reach ${fmtDay(from)} (chat start or scroll limit reached first).`;
+      }
+      const { text, count } = format(title, items, includeSeparators, rangeLabel);
       const safe = title.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 80) || "chat";
       const fileBase = `messenger_${safe}_${new Date().toISOString().slice(0, 10)}`;
       const saved = [];
@@ -444,13 +550,13 @@
         saved.push(fileBase + ".txt");
       }
       if (fmt === "pdf" || fmt === "both") {
-        await savePdf(title, items, includeSeparators, count, fileBase, keepPreview);
+        await savePdf(title, items, includeSeparators, count, fileBase, keepPreview, rangeLabel);
         saved.push(fileBase + ".pdf (via print dialog)");
       }
       const filename = saved.join(" and ");
-      progress(`Done! ${count} messages → ${filename}`);
-      closeOverlay();
-      return { ok: true, count, filename };
+      progress(`Done! ${count} messages → ${filename}` + (note ? `\n${note}` : ""));
+      closeOverlay(note ? 10000 : 4000);
+      return { ok: true, count, filename, note };
     } catch (e) {
       progress("Error: " + e.message);
       closeOverlay(8000);
