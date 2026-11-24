@@ -41,6 +41,18 @@ Dates come from the dividers Messenger shows between message groups ("Today", "M
 "Nov 3, 2025", "lapkričio 3 d." …), in English or Lithuanian. Each message gets the date of the
 divider above it. If no dates can be read, the whole loaded chat is exported and the popup says so.
 
+**Long chats / when does it stop?** It keeps scrolling until one of these happens:
+you reach the From date, Messenger loads nothing new for **Give up after N s** (default 90 s;
+raise it if your chat stops early), you click **Stop & save what I have** on the progress box,
+or the step limit is hit. The final message says which one it was. When Messenger seems stuck,
+the add-on scrolls down a bit and back up to wake it.
+
+**Keep the Messenger tab visible.** Edge slows background tabs to a crawl, so the export pauses
+while the tab is hidden and continues when you come back. Using another *window* is fine.
+
+**Hide already-read messages while scrolling** (on by default) hides messages the add-on has
+already read, so the page stays lighter; they are shown again when the export ends.
+
 **Max scroll steps** is a safety limit (each step loads one batch of older messages); raise it for very long chats.
 
 ## Output example

@@ -34,12 +34,14 @@
   <label style="display:flex"><input type="checkbox" id="pictures" checked> Include pictures in PDF</label>
   <div class="row">From <input type="date" id="from"> To <input type="date" id="to"></div>
   <div class="hint" style="margin:-2px 0 6px">Leave empty for the whole chat. With a From date it stops scrolling once it passes that day.</div>
-  <div class="row">Max scroll steps <input type="number" id="maxSteps" value="2000" min="1" max="10000"></div>
+  <div class="row">Give up after <input type="number" id="stall" value="90" min="10" max="1800"> s with nothing new</div>
+  <label style="display:flex"><input type="checkbox" id="lighten" checked> Hide already-read messages while scrolling (faster)</label>
+  <div class="row">Max scroll steps <input type="number" id="maxSteps" value="20000" min="1" max="1000000"></div>
   <label style="display:flex"><input type="checkbox" id="includeSeparators" checked> Include date/time separators</label>
   <button id="export">Export open chat</button>
   <div id="status"></div>
   <p class="hint">Open a conversation on messenger.com or facebook.com/messages first.
-  Progress is shown on the page.<br>Files go to <b>Downloads/Messenger export/&lt;chat&gt;/</b>. With splitting, each year/month is saved as soon as it has fully loaded, so a crash doesn't lose finished parts.<br>
+  Progress is shown on the page. <b>Keep the Messenger tab visible</b> (it pauses in the background); you can use another window meanwhile.<br>Files go to <b>Downloads/Messenger export/&lt;chat&gt;/</b>. With splitting, each year/month is saved as soon as it has fully loaded, so a crash doesn't lose finished parts.<br>
 PDFs are made automatically: Edge briefly shows a bar saying the extension "started debugging this browser" — that's expected.</p>
   <script src="popup.js"></script>
 </body>

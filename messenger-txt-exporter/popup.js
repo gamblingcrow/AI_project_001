@@ -12,9 +12,11 @@ $("export").addEventListener("click", async () => {
     }
     const options = {
       loadAll: $("loadAll").checked,
-      maxSteps: Math.max(1, parseInt($("maxSteps").value, 10) || 2000),
+      maxSteps: Math.max(1, parseInt($("maxSteps").value, 10) || 20000),
       includeSeparators: $("includeSeparators").checked,
       split: $("split").value,
+      stallSeconds: Math.max(10, parseInt($("stall").value, 10) || 90),
+      lighten: $("lighten").checked,
       pictures: $("pictures").checked,
       from: $("from").value,
       to: $("to").value,

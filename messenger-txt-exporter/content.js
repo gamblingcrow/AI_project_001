@@ -5,6 +5,8 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---------- progress overlay ----------
+  let userStop = false;
+
   function overlay() {
     let el = document.getElementById("__mtx_overlay");
     if (!el) {
@@ -14,11 +16,23 @@
         "position:fixed;top:12px;right:12px;z-index:2147483647;background:#0078ff;color:#fff;" +
         "font:13px system-ui,sans-serif;padding:10px 14px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.3);" +
         "max-width:320px;white-space:pre-wrap";
+      const text = document.createElement("div");
+      text.className = "__mtx_text";
+      const btn = document.createElement("button");
+      btn.className = "__mtx_stop";
+      btn.textContent = "Stop & save what I have";
+      btn.style.cssText = "margin-top:8px;padding:4px 10px;border:0;border-radius:5px;background:#fff;color:#0078ff;font-weight:600;cursor:pointer";
+      btn.onclick = () => { userStop = true; btn.disabled = true; btn.textContent = "Stopping…"; };
+      el.append(text, btn);
       document.body.appendChild(el);
     }
     return el;
   }
-  const progress = (msg) => { overlay().textContent = "Messenger export\n" + msg; };
+  const progress = (msg, done = false) => {
+    const el = overlay();
+    el.querySelector(".__mtx_text").textContent = "Messenger export\n" + msg;
+    el.querySelector(".__mtx_stop").style.display = done ? "none" : "";
+  };
   const closeOverlay = (delay = 4000) =>
     setTimeout(() => document.getElementById("__mtx_overlay")?.remove(), delay);
 
@@ -346,6 +360,26 @@
     return before.length + after.length;
   }
 
+  // Hide rows that were already read (except the oldest few at the top) so Messenger has
+  // less to lay out and paint while loading more history. They are shown again at the end.
+  const hiddenRows = [];
+  function hideReadRows(grid, keep = 40) {
+    const rows = getRows(grid);
+    for (let i = keep; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.style.display !== "none" && seen.has(idOf(r))) {
+        r.style.display = "none";
+        hiddenRows.push(new WeakRef(r));
+      }
+    }
+  }
+  function unhideRows() {
+    for (const ref of hiddenRows.splice(0)) {
+      const r = ref.deref();
+      if (r) r.style.display = "";
+    }
+  }
+
   // ---------- formatting ----------
   // Fill in senders (group chats only name the first message of a run) and remember each item's index.
   function resolve(title, entries) {
@@ -567,7 +601,9 @@
   window.__messengerTxtExport = async ({
     loadAll = true, maxSteps = 2000, includeSeparators = true, format: fmt = "txt",
     from: fromStr = "", to: toStr = "", split = "none", pictures = true,
+    stallSeconds = 90, lighten = true,
   } = {}) => {
+    userStop = false;
     try {
       wantPictures = pictures && fmt !== "txt";
       const from = parseInputDate(fromStr), to = parseInputDate(toStr);
@@ -577,7 +613,7 @@
       const grid = findGrid();
       if (!grid) {
         const diag = diagnostics();
-        progress("Couldn't find an open conversation on this page.\n" + diag);
+        progress("Couldn't find an open conversation on this page.\n" + diag, true);
         closeOverlay(15000);
         return { ok: false, error: "No open conversation found. Open a chat first.\n" + diag };
       }
@@ -654,45 +690,76 @@
       const scroller = loadAll ? findScroller(grid) : null;
       if (loadAll && !scroller) progress("Couldn't find the scroll area; exporting visible messages only.");
 
+      let stopReason = scroller ? "" : "visible";
       if (scroller) {
-        let stale = 0;
-        for (let step = 1; step <= maxSteps && stale < 4 && !reachedFrom; step++) {
+        let lastNewAt = Date.now();
+        for (let step = 1; ; step++) {
+          if (reachedFrom) { stopReason = "from"; break; }
+          if (step > maxSteps) { stopReason = "steps"; break; }
+          if (userStop) { stopReason = "user"; break; }
+
+          // Background tabs are throttled by the browser: pause instead of mistaking it for the end.
+          if (document.hidden) {
+            progress(`Paused: the Messenger tab is in the background.\nSwitch back to it to continue.\nRead ${seen.size} rows so far.`);
+            while (document.hidden && !userStop) await sleep(1000);
+            lastNewAt = Date.now();
+            continue;
+          }
+
           const prevHeight = scroller.scrollHeight;
+          const waiting = Date.now() - lastNewAt;
+          if (waiting > 3000) {
+            // Nudge: scroll down a bit and back up, so Messenger notices it should load more.
+            scroller.scrollTop = Math.min(800, Math.max(200, scroller.clientHeight));
+            scroller.dispatchEvent(new Event("scroll"));
+            await sleep(400);
+          }
           scroller.scrollTop = 0;
           scroller.dispatchEvent(new Event("scroll"));
-          // wait for more history to load
-          let grew = false;
-          for (let t = 0; t < 20; t++) {
-            await sleep(150);
-            if (scroller.scrollHeight !== prevHeight) { grew = true; break; }
+          // wait up to ~5 s for more history to appear
+          for (let t = 0; t < 25 && !userStop; t++) {
+            await sleep(200);
+            if (scroller.scrollHeight !== prevHeight) break;
           }
           await sleep(250);
           const added = collectNew(grid, acc);
-          stale = grew || added ? 0 : stale + 1;
+          if (added) lastNewAt = Date.now();
+          else if (!document.hidden && Date.now() - lastNewAt > stallSeconds * 1000) { stopReason = "stalled"; break; }
+
           const oldest = oldestDate(acc);
           if (from && oldest && oldest < from) reachedFrom = true;
           await flush(false);
-          progress(`Loading history… step ${step}/${maxSteps}\nRead ${seen.size} rows` +
+          if (lighten) hideReadRows(grid);
+          const idle = Math.round((Date.now() - lastNewAt) / 1000);
+          progress(`Loading history… step ${step}\nRead ${seen.size} rows` +
             (oldest ? `\nOldest date reached: ${fmtDay(oldest)}` : "") +
             (from ? `\nGoing back to: ${fmtDay(from)}` : "") +
+            (idle >= 5 ? `\nWaiting for Messenger to load more… ${idle}s (gives up at ${stallSeconds}s)` : "") +
             (savedFiles.length ? `\nSaved ${savedFiles.length} file(s), latest: ${savedFiles[savedFiles.length - 1]}` : ""));
         }
       }
 
       await flush(true);
+      unhideRows();
 
-      let note = "";
-      if ((from || to) && !anyDates) note = "Couldn't read any dates in this chat, so the date range was ignored.";
-      else if (from && !reachedFrom && loadAll) note = `Didn't reach ${fmtDay(from)} (chat start or scroll limit reached first).`;
+      const notes = [];
+      if ((from || to) && !anyDates) notes.push("Couldn't read any dates in this chat, so the date range was ignored.");
+      if (stopReason === "stalled") {
+        notes.push(`Stopped because Messenger loaded nothing new for ${stallSeconds}s` +
+          (from && !reachedFrom ? ` (before reaching ${fmtDay(from)}).` : " — most likely the start of the chat."));
+      } else if (stopReason === "steps") notes.push("Stopped at the scroll step limit.");
+      else if (stopReason === "user") notes.push("Stopped by you.");
+      let note = notes.join("\n");
       if (!savedFiles.length) note = (note ? note + "\n" : "") + "No messages matched, nothing was saved.";
 
       const where = viaExtension() ? `Downloads/${folder}/` : "Downloads";
       const filename = savedFiles.length <= 2 ? savedFiles.join(" and ") : `${savedFiles.length} files`;
-      progress(`Done! ${savedMessages} messages → ${filename}\nFolder: ${where}` + (note ? `\n${note}` : ""));
-      closeOverlay(note ? 10000 : 5000);
+      progress(`Done! ${savedMessages} messages → ${filename}\nFolder: ${where}` + (note ? `\n${note}` : ""), true);
+      closeOverlay(note ? 15000 : 5000);
       return { ok: true, count: savedMessages, filename: `${filename} in ${where}`, note };
     } catch (e) {
-      progress("Error: " + e.message);
+      unhideRows();
+      progress("Error: " + e.message, true);
       closeOverlay(10000);
       return { ok: false, error: e.message };
     }
